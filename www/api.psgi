@@ -5,6 +5,7 @@ use strict;
 use warnings;
 
 use DBI;
+use File::Slurp;
 use File::Write::Rotate;
 use JSON;
 use Perinci::Access::Base::Patch::PeriAHS;
@@ -13,9 +14,9 @@ use Plack::Util::PeriAHS qw(errpage);
 use App::cpanlists::Server;
 
 my $json = JSON->new->allow_nonref;
-my $conf = LoadFile "$ENV{HOME}/cpanlists-server.conf.json"; # $ENV{HOME} is empty if via fcgi, needs supplied
-my $dbh = DBI->connect(
-    "dbi:Pg:dbname=$conf->{dbname};host=localhost",
+my $home = (getpwuid($>))[7];  # $ENV{HOME} is empty if via fcgi
+my $conf = $json->decode(~~read_file("$home/cpanlists-server.conf.json"));
+my $dbh = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
     $conf->{dbuser}, $conf->{dbpass});
 App::cpanlists::Server::__dbh($dbh);
 
@@ -48,25 +49,33 @@ my $app = builder {
             my $action = $rreq->{action};
             $rreq->{uri} =~ s!\Apl:/api/!pl:/!;
             my ($mod, $func) = $rreq->{uri} =~ m!\A(?:pl:)?/(.+)/(.+)!;
-            # public actions
-            return 0 if $action eq 'meta' ||
-                $action eq 'call' && $mod eq 'App/cpanlists/Server' && $func =~ /\A(create_user|get_lists|list_lists)\z/;
-            return 1;
+            $mod //= ""; $func //= "";
+
+            # public actions that need not authentication
+            if ($action =~ /^(meta|info|actions|list|child_metas)$/ ||
+                    $action eq 'call' && $mod eq 'App/cpanlists/Server' && $func =~ /\A(create_user|list_lists|list_items)\z/) {
+                $env->{"app.needs_auth"} = 0;
+                return 0;
+            } else {
+                $env->{"app.needs_auth"} = 1;
+                return 1;
+            }
         },
         "Auth::Basic",
         authenticator => sub {
-                my ($user, $pass, $env) = @_;
+            my ($user, $pass, $env) = @_;
 
-                #my $role;
-                my $res = App::cpanlists::Server::auth_user(
-                    user => $user, pass=>$pass);
-                if ($res->[0] == 200) {
-                    $env->{"cpanlists.user_id"} = $res->[2]{id};
-                    return 1;
-                }
-                return 0;
-            },
-        );
+            #my $role;
+            my $res = App::cpanlists::Server::auth_user(
+                username => $user, password=>$pass);
+            if ($res->[0] == 200) {
+                $env->{"REMOTE_USER"} = $user; # isn't this already done by webserver?
+                $env->{"app.user_id"} = $res->[2]{id};
+                return 1;
+            }
+            return 0;
+        }
+    );
 
     enable(
         sub {
@@ -79,22 +88,21 @@ my $app = builder {
                 return errpage($env, [403,"Only cpanlists functions are currently allowed"])
                     unless $rreq->{uri} =~ m!\A(pl:)?(/App/cpanlists/Server/)!;
 
-                #return errpage($env, [403, "Only call action is currently alllowed"])
-                #    unless $rreq->{action} eq 'call';
-
                 my ($mod, $func) = $rreq->{uri} =~ m!\A(?:pl:)?/(.+)/(.+)!;
                 $mod =~ s!/!::!g;
 
                 # authz
                 {
-                    my $uid  = $env->{"cpanlists.user_id"};
-                    #my $role = $env->{"cpalists.user_role"};
+                    last unless $env->{"app.needs_auth"};
 
-                    # everybody can create/comment/like/unlike lists
-                    last if $func =~ /^(create_list|comment_list|like_list|unlike_lists)$/;
+                    my $uid  = $env->{"app.user_id"};
+                    #my $role = $env->{"app.user_role"};
+
+                    # everybody create/comment/like/unlike lists
+                    last if $func =~ /^(list_lists|get|list|create_list|comment_list|like_list|unlike_list)$/;
 
                     # user can add item/delete item/delete lists he created
-                    if ($role eq 'reseller' && $func =~ /^(delete_list|add_item|delete_item)$/) {
+                    if ($func =~ /^(delete_list|add_item|delete_item)$/) {
                         my $res = App::cpanlists::Server::get_list(id => $rreq->{args}{id}, items=>0);
                         return errpage($env, $res) if $res->[0] != 200;
                         return errpage($env, [403, "List does not exist or not yours"])
