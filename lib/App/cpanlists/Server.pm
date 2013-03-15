@@ -17,6 +17,8 @@ use SHARYANTO::SQL::Schema 0.04;
 our %SPEC;
 my $json = JSON->new->allow_nonref;
 
+my $mcpan = MetaCPAN::API->new;
+
 my $spec = {
     latest_v => 1,
 
@@ -40,15 +42,23 @@ my $spec = {
             creator INT NOT NULL REFERENCES "user"(id),
             name VARCHAR(255) NOT NULL, UNIQUE(name), -- citext
             -- XXX type: module, author
-            comment TEXT,
+            description TEXT,
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
 
         q[CREATE TABLE item (
             id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL, UNIQUE(name),
+            summary TEXT,
+            note TEXT,
+            ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )],
+
+        q[CREATE TABLE list_item (
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
-            name VARCHAR(255) NOT NULL, UNIQUE(list_id, name),
+            item_id INT NOT NULL REFERENCES item(id), UNIQUE(list_id, item_id),
             comment TEXT,
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -185,7 +195,7 @@ sub create_user {
                   last;
               };
     }
-    __activity_log(action => 'create user', note => {username=>$args{username}});
+    __activity_log(action => 'create user', note => {username=>$args{username}}) unless $err;
     __dbh->commit;
     return $err if $err;
     [200, "OK", { id=>__dbh->last_insert_id(undef, undef, "user", undef) }];
@@ -278,8 +288,10 @@ $SPEC{list_lists} = {
         },
         creator => {
             schema => ['str*'],
-            cmdline_aliases => {q => {}},
-            pos => 0,
+            tags => [qw/filter/],
+        },
+        id => {
+            schema => ['int*'],
             tags => [qw/filter/],
         },
     },
@@ -291,7 +303,7 @@ sub list_lists {
     my $sql = q[SELECT
                   l.id AS id,
                   l.name AS name,
-                  l.comment AS comment,
+                  l.description AS description,
                   u.username AS creator,
                   DATE_PART('epoch', l.ctime)::int AS ctime,
                   (SELECT COUNT(*) FROM list_like WHERE list_id=l.id) AS likes
@@ -303,11 +315,14 @@ sub list_lists {
     if (length($q)) {
         my $qq = __dbh->quote(lc $q);
         $qq =~ s/\A'//; $qq =~ s/'\z//;
-        push @where, "LOWER(name) LIKE '%$qq%' OR LOWER(comment) LIKE '%$qq%'";
+        push @where, "LOWER(name) LIKE '%$qq%' OR LOWER(description) LIKE '%$qq%'";
     }
     $sql .= " WHERE ".join(" AND ", map {"($_)"} @where) if @where;
     if (defined $args{creator}) {
         push @where, "creator=".__dbh->quote($args{creator});
+    }
+    if (defined $args{id}) {
+        push @where, "id=".__dbh->quote($args{id});
     }
     $sql .= " ORDER BY likes DESC, ctime DESC";
     $log->tracef("sql=%s", $sql);
@@ -317,7 +332,7 @@ sub list_lists {
     my @rows;
     while (my $row = $sth->fetchrow_hashref) { push @rows, $row }
 
-    [200, "OK", \@rows, {result_format_options=>{table_column_orders=>[ [qw/id name creator comment/] ]}}];
+    [200, "OK", \@rows, {result_format_options=>{table_column_orders=>[ [qw/id name creator description/] ]}}];
 }
 
 $SPEC{create_list} = {
@@ -325,11 +340,19 @@ $SPEC{create_list} = {
     summary => 'Create a new list',
     args => {
         name => {
+            summary => 'The list title',
             schema => ['str*', min_len=>1],
             req => 1,
             pos => 0,
+            description => <<'_',
+
+Examples: "Steven's most favorite modules", "Modules to do blah", "Top ten
+modules you'll want for christmas".
+
+_
         },
-        comment => {
+        description => {
+            summary => 'A longer (one to several paragraphs) of description',
             schema => ['str*'],
             description => 'Will be interpreted as Markdown',
         },
@@ -342,16 +365,15 @@ sub create_list {
     __dbh->begin_work;
     my $err;
     {
-        __dbh->do(q[INSERT INTO list_like (list_id,user_id) VALUES (?,?)],
+        __dbh->do(q[INSERT INTO list (creator,name,description) VALUES (?,?,?)],
                   {},
-                  __env->{"app.user_id"},
-                  $args{name}, $args{comment},
+                  __env->{"app.user_id"}, $args{name}, $args{description},
               ) or do {
                   $err = [500, "Can't create list: " . __dbh->errstr];
                   last;
               };
     }
-    __activity_log(action => 'create list', note => {name=>$args{name}, comment=>$args{comment}});
+    __activity_log(action => 'create list', note => {name=>$args{name}, description=>$args{description}}) unless $err;
     __dbh->commit;
     return $err if $err;
     [200, "OK", { id=>__dbh->last_insert_id(undef, undef, "list", undef) }];
@@ -392,7 +414,7 @@ sub like_list {
             if (!$res) { $err = [500, "Can't insert: " . __dbh->errstr]; last }
         }
     }
-    #__activity_log(action => 'like list', note => {id=>$lid});
+    #__activity_log(action => 'like list', note => {id=>$lid}) unless $err;
     __dbh->commit;
     return $err if $err;
     [200, "OK"];
@@ -424,7 +446,7 @@ sub unlike_list {
         my $res = __dbh->do(q[DELETE FROM list_like WHERE list_id=? AND user_id=?], {}, $lid, $uid);
         if (!$res) { $err = [500, "Can't delete: " . __dbh->errstr]; last }
     }
-    #__activity_log(action => 'unlike list', note => {id=>$lid});
+    #__activity_log(action => 'unlike list', note => {id=>$lid}) unless $err;
     #__dbh->commit;
     return $err if $err;
     [200, "OK"];
@@ -446,18 +468,152 @@ sub list_items {
     my %args = @_; # VALIDATE_ARGS
     my $sth = __dbh->prepare(
         "SELECT
+           li.item_id AS id,
            i.name AS name,
-           i.comment AS comment,
-           DATE_PART('epoch', i.ctime)::int AS ctime,
-         FROM item WHERE list_id=? ORDER BY ctime");
+           i.summary AS abstract,
+           li.comment AS comment,
+           DATE_PART('epoch', li.ctime)::int AS ctime
+         FROM list_item li
+         LEFT JOIN item i ON li.item_id=i.id
+         WHERE list_id=? ORDER BY li.ctime");
     $sth->execute($args{list_id});
 
-    my %items;
+    my @items;
     while (my $row = $sth->fetchrow_hashref) {
-        my $name = delete $row->{name};
-        $items{$name} = $row;
+        push @items, $row;
     }
-    [200, "OK", \%items];
+    [200, "OK", \@items];
+}
+
+$SPEC{get_list} = {
+    v => 1.1,
+    summary => "Get details about a list",
+    args => {
+        id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        items => {
+            summary => "Whether to retrieve list's items",
+            schema => ['bool*', default => 1],
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub get_list {
+    my %args = @_; # VALIDATE_ARGS
+    my $res = list_lists(id => $args{id});
+    return "Can't list items: $res->[0] - $res->[1]" if $res->[0] != 200;
+    return [404, "No such list"] unless @{$res->[2]};
+    my $list = $res->[2][0];
+    if ($args{items}) {
+        $res = list_items(list_id=>$args{id});
+        return "Can't get items: $res->[0] - $res->[1]" if $res->[0] != 200;
+        $list->{items} = $res->[2];
+    }
+    [200, "OK", $list];
+}
+
+$SPEC{add_item} = {
+    v => 1.1,
+    summary => "Add an item to a list",
+    args => {
+        list_id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        name => {
+            summary => "Item's name (i.e. module name)",
+            schema => ['str*'],
+            req => 1,
+            pos => 1,
+        },
+        comment => {
+            summary => "Comment",
+            schema => ['str*'],
+            pos => 2,
+            description => 'Will be interpreted as Markdown',
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub add_item {
+    my %args = @_; # VALIDATE_ARGS
+
+    __dbh->begin_work;
+    my $err;
+    {
+        # first of all, find the item's name in the database
+        my $row = __dbh->selectrow_hashref("SELECT * FROM item WHERE name=?", {}, $args{name});
+        my $item_id;
+
+        # if not already exist, fetch from MetaCPAN
+        if ($row) {
+            $item_id = $row->{id};
+        } else {
+            $log->debugf("Fetching module '%s' info from MetaCPAN ...", $args{name});
+            my $mcres;
+            eval {
+                $mcres = $mcpan->module($args{name});
+            };
+            if ($@) { $err = [500, "Can't query MetaCPAN for module '$args{name}', probably not found: $@"]; last }
+            __dbh->do("INSERT INTO item (name, summary) VALUES (?,?)", {}, $args{name}, $mcres->{abstract})
+                or do { $err = [500, "Can't insert item: " . __dbh->errstr]; last };
+            $item_id = __dbh->last_insert_id(undef, undef, "item", undef);
+        }
+
+        __dbh->do(q[INSERT INTO list_item (list_id,item_id,comment) VALUES (?,?,?)],
+                  {},
+                  $args{list_id}, $item_id, $args{comment},
+              ) or do {
+                  $err = [500, "Can't add item: " . __dbh->errstr];
+                  last;
+              };
+    }
+    __activity_log(action => 'add item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{comment}}) unless $err;
+    __dbh->commit;
+    return $err if $err;
+    [200, "OK"];
+}
+
+$SPEC{delete_item} = {
+    v => 1.1,
+    summary => "Delete an item from a list",
+    args => {
+        list_id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        name => {
+            summary => "Item's name",
+            schema => ['str*'],
+            req => 1,
+            pos => 1,
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub delete_item {
+    my %args = @_; # VALIDATE_ARGS
+
+    __dbh->begin_work;
+    my $err;
+    {
+        __dbh->do(q[DELETE FROM list_item WHERE list_id=? AND item_id=(SELECT id FROM item WHERE name=?)],
+                  {},
+                  $args{list_id}, $args{name},
+              ) or do {
+                  $err = [500, "Can't delete item: " . __dbh->errstr];
+                  last;
+              };
+    }
+    __activity_log(action => 'delete item', note => {list_id=>$args{list_id}, name=>$args{name}}) unless $err;
+    __dbh->commit;
+    return $err if $err;
+    [200, "OK"];
 }
 
 1;

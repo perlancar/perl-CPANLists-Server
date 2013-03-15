@@ -53,7 +53,7 @@ my $app = builder {
 
             # public actions that need not authentication
             if ($action =~ /^(meta|info|actions|list|child_metas)$/ ||
-                    $action eq 'call' && $mod eq 'App/cpanlists/Server' && $func =~ /\A(create_user|list_lists|list_items)\z/) {
+                    $action eq 'call' && $mod eq 'App/cpanlists/Server' && $func =~ /\A(create_user|get_list|list_lists|list_items)\z/) {
                 $env->{"app.needs_auth"} = 0;
                 return 0;
             } else {
@@ -96,17 +96,19 @@ my $app = builder {
                     last unless $env->{"app.needs_auth"};
 
                     my $uid  = $env->{"app.user_id"};
+                    my $user = $env->{REMOTE_USER};
                     #my $role = $env->{"app.user_role"};
 
                     # everybody create/comment/like/unlike lists
-                    last if $func =~ /^(list_lists|get|list|create_list|comment_list|like_list|unlike_list)$/;
+                    last if $func =~ /^(create_list|add_list_comment|like_list|unlike_list)$/;
 
                     # user can add item/delete item/delete lists he created
-                    if ($func =~ /^(delete_list|add_item|delete_item)$/) {
-                        my $res = App::cpanlists::Server::get_list(id => $rreq->{args}{id}, items=>0);
+                    if ($func =~ /^(delete_list|delete_list_comment|add_item|delete_item)$/) {
+                        my $lid = $func =~ /^(delete_list)$/ ? $rreq->{args}{id} : $rreq->{args}{list_id};
+                        my $res = App::cpanlists::Server::get_list(id => $lid, items=>0);
                         return errpage($env, $res) if $res->[0] != 200;
-                        return errpage($env, [403, "List does not exist or not yours"])
-                            unless $res->[2]{creator} == $uid;
+                        return errpage($env, [403, "List is not yours"])
+                            unless $res->[2]{creator} eq $user;
                         last;
                     }
 
