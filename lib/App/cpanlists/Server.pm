@@ -119,7 +119,7 @@ sub __activity_log {
              {},
              (__env() ? __env->{REMOTE_ADDR} : $ENV{REMOTE_ADDR}),
              $args{action},
-             (__env() ? __env->{"cpanlists.user_id"} : undef),
+             (__env() ? __env->{"app.user_id"} : undef),
              (ref($args{note}) ? $json->encode($args{note}) : $args{note}),
             )) {
         return 1;
