@@ -621,7 +621,10 @@ sub delete_item {
 
 =head1 SYNOPSIS
 
-See L<App::cpanlists> for the client program.
+You probably do not want to install this. This distribution contains the code to
+run on cpanlists.org.
+
+For the client program, see L<App::cpanlists>.
 
 
 =head1 DESCRIPTION
