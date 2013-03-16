@@ -537,7 +537,7 @@ sub delete_list {
     __dbh->begin_work;
     my $err;
     {
-        __dbh->do(q[DELETE FROM list WHERE id=?)],
+        __dbh->do(q[DELETE FROM list WHERE id=?],
                   {},
                   $args{id},
               ) or do { $err = [500, "Can't delete list: " . __dbh->errstr]; last };
