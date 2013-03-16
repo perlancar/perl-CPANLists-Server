@@ -370,25 +370,34 @@ _
 };
 sub create_list {
     my %args = @_; # VALIDATE_ARGS
+    my $desc = $args{description};
 
     __dbh->begin_work;
     my $err;
-  WORK:
+
     {
-        my $desc = $args{description};
         __dbh->do(q[INSERT INTO list (creator,name,description) VALUES (?,?,?)],
                   {},
                   __env->{"app.user_id"}, $args{name}, $desc,
               ) or do { $err = [500, "Can't create list: " . __dbh->errstr]; last };
 
-        # try to detect module names from text, and add them as items
+    }
+    __activity_log(action => 'create list', note => {name=>$args{name}, description=>$args{description}}) unless $err;
+    __dbh->commit;
+    return $err if $err;
+    my $lid=__dbh->last_insert_id(undef, undef, "list", undef);
+
+    # try to detect module names from text, and add them as items
+    __dbh->begin_work;
+  WORK:
+    {
         if ($desc) {
             my @mods;
             while ($desc =~ m!(\w+(?:::\w+)+) | mod://(\w+(?:::\w+)*)!gx) {
                 my $mod = $1 // $2;
-                $log->debugf("Detected module name %s", $mod);
                 push @mods, $mod;
             }
+            $log->debugf("Detected module name(s) %s", \@mods);
           MOD:
             for my $mod (@mods) {
                 my $row = __dbh->selectrow_hashref("SELECT * FROM item WHERE name=?", {}, $mod);
@@ -398,28 +407,27 @@ sub create_list {
                 if ($row) {
                     $item_id = $row->{id};
                 } else {
-                    $log->debugf("Fetching module '%s' info from MetaCPAN ...", $args{name});
+                    $log->debugf("Fetching module '%s' info from MetaCPAN ...", $mod);
                     my $mcres;
                     eval {
-                        $mcres = $mcpan->module($args{name});
+                        $mcres = $mcpan->module($mod);
                     };
                     if ($@) { next MOD }
                     __dbh->do("INSERT INTO item (name, summary) VALUES (?,?)", {}, $mod, $mcres->{abstract})
-                        or do { $err = [500, "Can't insert item $mod: " . __dbh->errstr]; last WORK };
+                        or do { $log->errorf("Can't insert item %s: %s", $mod, __dbh->errstr); last WORK };
                     $item_id = __dbh->last_insert_id(undef, undef, "item", undef);
                 }
                 $log->debugf("Adding item %s ...", $mod);
-                __dbh->do(q[INSERT INTO list_item (list_id,item_id) VALUES (?,?,?)],
+                __dbh->do(q[INSERT INTO list_item (list_id,item_id) VALUES (?,?)],
                           {},
-                          $args{id}, $item_id,
-                      ) or do { $err = [500, "Can't add item $mod: " . __dbh->errstr]; last WORK };
+                          $lid, $item_id,
+                      ) or do { $log->errorf("Can't add item %s: %s", $mod, __dbh->errstr); last WORK };
             }
         } # if $desc
     }
-    __activity_log(action => 'create list', note => {name=>$args{name}, description=>$args{description}}) unless $err;
     __dbh->commit;
-    return $err if $err;
-    [200, "OK", { id=>__dbh->last_insert_id(undef, undef, "list", undef) }];
+
+    [200, "OK", { id=>$lid }];
 }
 
 $SPEC{like_list} = {
