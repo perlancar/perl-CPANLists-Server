@@ -99,12 +99,12 @@ my $app = builder {
                     my $user = $env->{REMOTE_USER};
                     #my $role = $env->{"app.user_role"};
 
-                    # everybody create/comment/like/unlike lists
+                    # everybody can create/comment/like/unlike lists
                     last if $func =~ /^(create_list|add_list_comment|like_list|unlike_list)$/;
 
-                    # user can add item/delete item/delete lists he created
-                    if ($func =~ /^(delete_list|delete_list_comment|add_item|delete_item)$/) {
-                        my $lid = $func =~ /^(delete_list)$/ ? $rreq->{args}{id} : $rreq->{args}{list_id};
+                    # user can add item/update/delete item & lists he created
+                    if ($func =~ /^(delete_list|update_list|delete_list_comment|update_list_comment|add_item|delete_item|update_item)$/) {
+                        my $lid = $func =~ /^(delete_list|update_list)$/ ? $rreq->{args}{id} : $rreq->{args}{list_id};
                         my $res = App::cpanlists::Server::get_list(id => $lid, items=>0);
                         return errpage($env, $res) if $res->[0] != 200;
                         return errpage($env, [403, "List is not yours"])

@@ -309,21 +309,21 @@ sub list_lists {
                   (SELECT COUNT(*) FROM list_like WHERE list_id=l.id) AS likes
                 FROM list l
                 LEFT JOIN "user" u ON l.creator=u.id];
-    my @where;
+    my @wheres;
 
     my $q = $args{query} // '';
     if (length($q)) {
         my $qq = __dbh->quote(lc $q);
         $qq =~ s/\A'//; $qq =~ s/'\z//;
-        push @where, "LOWER(name) LIKE '%$qq%' OR LOWER(description) LIKE '%$qq%'";
+        push @wheres, "LOWER(l.name) LIKE '%$qq%' OR LOWER(l.description) LIKE '%$qq%'";
     }
-    $sql .= " WHERE ".join(" AND ", map {"($_)"} @where) if @where;
     if (defined $args{creator}) {
-        push @where, "creator=".__dbh->quote($args{creator});
+        push @wheres, "l.creator=".__dbh->quote($args{creator});
     }
     if (defined $args{id}) {
-        push @where, "id=".__dbh->quote($args{id});
+        push @wheres, "l.id=".__dbh->quote($args{id});
     }
+    $sql .= " WHERE ".join(" AND ", map {"($_)"} @wheres) if @wheres;
     $sql .= " ORDER BY likes DESC, ctime DESC";
     $log->tracef("sql=%s", $sql);
 
@@ -515,6 +515,90 @@ sub get_list {
     [200, "OK", $list];
 }
 
+$SPEC{delete_list} = {
+    v => 1.1,
+    summary => "Delete a list",
+    args => {
+        id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        reason => {
+            summary => 'Optional reason for deletion',
+            schema => ['str*'],
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub delete_list {
+    my %args = @_; # VALIDATE_ARGS
+
+    __dbh->begin_work;
+    my $err;
+    {
+        __dbh->do(q[DELETE FROM list WHERE id=?)],
+                  {},
+                  $args{id},
+              ) or do { $err = [500, "Can't delete list: " . __dbh->errstr]; last };
+    }
+    __activity_log(action => 'delete list', note => {list_id=>$args{list_id}, name=>$args{name}}) unless $err;
+    __dbh->commit;
+    return $err if $err;
+    [200, "OK"];
+}
+
+$SPEC{update_list} = {
+    v => 1.1,
+    summary => "Update a list",
+    args => {
+        id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        new_name => {
+            summary => "List's new name",
+            schema => ['str'],
+            description => 'If not specified, name will not be changed',
+        },
+        new_description => {
+            summary => "List's new description",
+            schema => ['str*'],
+            description => "If not specified, description will not be changed",
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub update_list {
+    my %args = @_; # VALIDATE_ARGS
+
+    __dbh->begin_work;
+    my $err;
+    {
+        my $sql = "UPDATE list SET";
+        my @params;
+        if (exists $args{new_name}) {
+            $sql .= (@params ? ", ":" ") . " name=?";
+            push @params, $args{new_name};
+        }
+        if (exists $args{new_description}) {
+            $sql .= (@params ? ", ":" ") . " description=?";
+            push @params, $args{new_description};
+        }
+        if (!@params) { $err = [304, "Nothing is changed"]; last }
+        $sql .= ",mtime=CURRENT TIMESTAMP";
+        $sql .= " WHERE id=?";
+        push @params, $args{id};
+        my $n = __dbh->do($sql, {}, @params) or do { $err = [500, "Can't update list: " . __dbh->errstr]; last };
+        $n+0 or do { $err = [404, "No such list"]; last }
+    }
+    __activity_log(action => 'update list', note => {list_id=>$args{list_id}, new_name=>$args{new_name}, new_description=>$args{new_description}}) unless $err;
+    __dbh->commit;
+    return $err if $err;
+    [200, "OK"];
+}
+
 $SPEC{add_item} = {
     v => 1.1,
     summary => "Add an item to a list",
@@ -611,6 +695,55 @@ sub delete_item {
               };
     }
     __activity_log(action => 'delete item', note => {list_id=>$args{list_id}, name=>$args{name}}) unless $err;
+    __dbh->commit;
+    return $err if $err;
+    [200, "OK"];
+}
+
+$SPEC{update_item} = {
+    v => 1.1,
+    summary => "Update a list item",
+    args => {
+        list_id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        name => {
+            summary => "Item's name",
+            schema => ['str*'],
+            req => 1,
+            pos => 1,
+        },
+        new_comment => {
+            summary => "Item's new comment",
+            schema => ['str'],
+            description => "If not specified, comment will not be changed",
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub update_item {
+    my %args = @_; # VALIDATE_ARGS
+
+    __dbh->begin_work;
+    my $err;
+    {
+        my $sql = "UPDATE list_item SET";
+        my @params;
+        if (exists $args{new_comment}) {
+            $sql .= (@params ? ", ":" ") . "comment=?";
+            push @params, $args{new_comment};
+        }
+        if (!@params) { $err = [304, "No changes"]; last }
+        $sql .= ",mtime=CURRENT TIMESTAMP";
+        $sql .= " WHERE list_id=? AND item_id=(SELECT id FROM item WHERE name=?)";
+        push @params, $args{list_id}, $args{name};
+        my $n = __dbh->do($sql, {}, @params)
+            or do { $err = [500, "Can't update item: " . __dbh->errstr]; last };
+        $n+0 or do { $err = [404, "No such item"]; last }
+    }
+    __activity_log(action => 'update item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{new_comment}}) unless $err;
     __dbh->commit;
     return $err if $err;
     [200, "OK"];
