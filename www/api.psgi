@@ -53,7 +53,7 @@ my $app = builder {
 
             # public actions that need not authentication
             if ($action =~ /^(meta|info|actions|list|child_metas)$/ ||
-                    $action eq 'call' && $mod eq 'App/cpanlists/Server' && $func =~ /\A(create_user|get_list|list_lists|list_items)\z/) {
+                    $action eq 'call' && $mod eq 'App/cpanlists/Server' && $func =~ /\A(create_user|get_list|list_lists|list_items|get_comment|list_comments)\z/) {
                 $env->{"app.needs_auth"} = 0;
                 return 0;
             } else {
@@ -100,14 +100,24 @@ my $app = builder {
                     #my $role = $env->{"app.user_role"};
 
                     # everybody can create/comment/like/unlike lists
-                    last if $func =~ /^(create_list|add_list_comment|like_list|unlike_list)$/;
+                    last if $func =~ /^(create_list|add_comment|like_list|unlike_list)$/;
 
-                    # user can add item/update/delete item & lists he created
-                    if ($func =~ /^(delete_list|update_list|delete_list_comment|update_list_comment|add_item|delete_item|update_item)$/) {
+                    # user can add item/update/delete item of lists he created
+                    if ($func =~ /^(delete_list|update_list|add_item|delete_item|update_item)$/) {
                         my $lid = $func =~ /^(delete_list|update_list)$/ ? $rreq->{args}{id} : $rreq->{args}{list_id};
                         my $res = App::cpanlists::Server::get_list(id => $lid, items=>0);
                         return errpage($env, $res) if $res->[0] != 200;
                         return errpage($env, [403, "List is not yours"])
+                            unless $res->[2]{creator} eq $user;
+                        last;
+                    }
+
+                    # user can update/delete his own comments
+                    if ($func =~ /^(delete_comment|update_comment)$/) {
+                        my $cid = $rreq->{args}{id};
+                        my $res = App::cpanlists::Server::get_comment(id => $cid);
+                        return errpage($env, $res) if $res->[0] != 200;
+                        return errpage($env, [403, "Comment is not yours"])
                             unless $res->[2]{creator} eq $user;
                         last;
                     }

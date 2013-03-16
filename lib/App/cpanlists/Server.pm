@@ -64,10 +64,11 @@ my $spec = {
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
 
-        q[CREATE TABLE list_comment (
+        q[CREATE TABLE comment (
+            id SERIAL PRIMARY KEY,
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
-            name VARCHAR(255) NOT NULL, UNIQUE(list_id, name),
             comment TEXT,
+            creator INT NOT NULL REFERENCES "user"(id),
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
@@ -304,12 +305,13 @@ sub list_lists {
                   l.id AS id,
                   l.name AS name,
                   l.description AS description,
-                  u.username AS creator,
+                  (SELECT username FROM "user" u WHERE u.id=l.creator) AS creator,
                   DATE_PART('epoch', l.ctime)::int AS ctime,
                   (SELECT COUNT(*) FROM list_item WHERE list_id=l.id) AS num_items,
-                  (SELECT COUNT(*) FROM list_like WHERE list_id=l.id) AS likes
+                  (SELECT COUNT(*) FROM list_like WHERE list_id=l.id) AS num_likes,
+                  (SELECT COUNT(*) FROM comment   WHERE list_id=l.id) AS num_comments
                 FROM list l
-                LEFT JOIN "user" u ON l.creator=u.id];
+            ];
     my @wheres;
 
     my $q = $args{query} // '';
@@ -325,7 +327,7 @@ sub list_lists {
         push @wheres, "l.id=".__dbh->quote($args{id});
     }
     $sql .= " WHERE ".join(" AND ", map {"($_)"} @wheres) if @wheres;
-    $sql .= " ORDER BY likes DESC, ctime DESC";
+    $sql .= " ORDER BY num_likes DESC, ctime DESC";
     $log->tracef("sql=%s", $sql);
 
     my $sth = __dbh->prepare($sql);
@@ -593,7 +595,7 @@ sub delete_list {
                   $args{id},
               ) or do { $err = [500, "Can't delete list: " . __dbh->errstr]; last };
     }
-    __activity_log(action => 'delete list', note => {list_id=>$args{list_id}, name=>$args{name}}) unless $err;
+    __activity_log(action => 'delete list', note => {list_id=>$args{list_id}, name=>$args{name}, reason=>$args{reason}}) unless $err;
     __dbh->commit;
     return $err if $err;
     [200, "OK"];
@@ -797,9 +799,146 @@ sub update_item {
     [200, "OK"];
 }
 
-# func: add_list_comment()
-# func: update_list_comment()?
-# func: delete_list_comment()
+$SPEC{get_comment} = {
+    v => 1.1,
+    summary => "Get a single comment",
+    args => {
+        id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub get_comment {
+    my %args = @_; # VALIDATE_ARGS
+    my $row = __dbh->selectrow_hashref(
+        q[SELECT
+           c.id AS id,
+           c.comment AS comment,
+           (SELECT username FROM "user" u WHERE u.id=c.creator) AS creator,
+           DATE_PART('epoch', c.ctime)::int AS ctime
+         FROM comment c
+         WHERE c.id=?], {}, $args{id});
+    if ($row) {
+        return [200, "OK", $row];
+    } else {
+        return [404, "No such comment"];
+    }
+}
+
+$SPEC{list_comments} = {
+    v => 1.1,
+    summary => "List comments to a list",
+    args => {
+        list_id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        id => {
+            schema => ['int*'],
+            tags => [qw/filter/],
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub list_comments {
+    my %args = @_; # VALIDATE_ARGS
+    my $sth = __dbh->prepare(
+        q[SELECT
+           c.id AS id,
+           c.comment AS comment,
+           (SELECT username FROM "user" u WHERE u.id=c.creator) AS creator,
+           DATE_PART('epoch', c.ctime)::int AS ctime
+         FROM comment c
+         WHERE c.list_id=? ORDER BY c.ctime]);
+    $sth->execute($args{list_id});
+
+    my @items;
+    while (my $row = $sth->fetchrow_hashref) {
+        push @items, $row;
+    }
+    [200, "OK", \@items];
+}
+
+$SPEC{add_comment} = {
+    v => 1.1,
+    summary => "Add a comment to a list",
+    args => {
+        list_id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        comment => {
+            summary => "Comment",
+            schema => ['str*'],
+            req => 1,
+            pos => 1,
+            description => 'Will be interpreted as Markdown',
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub add_comment {
+    my %args = @_; # VALIDATE_ARGS
+    my $desc = $args{description};
+
+    __dbh->begin_work;
+    my $err;
+
+    {
+        __dbh->do(q[INSERT INTO comment (creator,list_id,comment) VALUES (?,?,?)],
+                  {},
+                  (__env() ? __env->{"app.user_id"} : undef),
+                  $args{list_id}, $args{comment})
+            or do { $err = [500, "Can't add comment: " . __dbh->errstr]; last };
+
+    }
+    __activity_log(action => 'add comment', note => {list_id=>$args{list_id}, comment=>$args{comment}}) unless $err;
+    __dbh->commit;
+    return $err if $err;
+    my $cid=__dbh->last_insert_id(undef, undef, "comment", undef);
+    [200, "OK", { id=>$cid }];
+}
+
+# XXX instead of delete row, option to replace comment with "(Deleted)"
+$SPEC{delete_comment} = {
+    v => 1.1,
+    summary => "Delete a single comment",
+    args => {
+        id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        reason => {
+            summary => 'Optional reason for deletion',
+            schema => ['str*'],
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub delete_comment {
+    my %args = @_; # VALIDATE_ARGS
+
+    __dbh->begin_work;
+    my $err;
+    {
+        __dbh->do(q[DELETE FROM comment WHERE id=?],
+                  {},
+                  $args{id},
+              ) or do { $err = [500, "Can't delete comment: " . __dbh->errstr]; last };
+    }
+    __activity_log(action => 'delete comment', note => {id=>$args{id}, reason=>$args{reason}}) unless $err;
+    __dbh->commit;
+    return $err if $err;
+    [200, "OK"];
+}
+
+# func: update_comment()?
 
 1;
 #ABSTRACT: Application that runs on cpanlists.org
