@@ -356,7 +356,14 @@ _
         description => {
             summary => 'A longer (one to several paragraphs) of description',
             schema => ['str*'],
-            description => 'Will be interpreted as Markdown',
+            description => <<'_',
+
+Will be interpreted as Markdown.
+
+Module names in the form of `Foo::bar` or `mod://Foo::bar` or `mod://foo` will
+be detected and added as items if indeed are CPAN module names.
+
+_
         },
     },
     "_perinci.sub.wrapper.validate_args" => 0,
@@ -366,14 +373,48 @@ sub create_list {
 
     __dbh->begin_work;
     my $err;
+  WORK:
     {
+        my $desc = $args{description};
         __dbh->do(q[INSERT INTO list (creator,name,description) VALUES (?,?,?)],
                   {},
-                  __env->{"app.user_id"}, $args{name}, $args{description},
-              ) or do {
-                  $err = [500, "Can't create list: " . __dbh->errstr];
-                  last;
-              };
+                  __env->{"app.user_id"}, $args{name}, $desc,
+              ) or do { $err = [500, "Can't create list: " . __dbh->errstr]; last };
+
+        # try to detect module names from text, and add them as items
+        if ($desc) {
+            my @mods;
+            while ($desc =~ m!(\w+(?:::\w+)+) | mod://(\w+(?:::\w+)*)!gx) {
+                my $mod = $1 // $2;
+                $log->debugf("Detected module name %s", $mod);
+                push @mods, $mod;
+            }
+          MOD:
+            for my $mod (@mods) {
+                my $row = __dbh->selectrow_hashref("SELECT * FROM item WHERE name=?", {}, $mod);
+                my $item_id;
+
+                # if not already exist, fetch from MetaCPAN
+                if ($row) {
+                    $item_id = $row->{id};
+                } else {
+                    $log->debugf("Fetching module '%s' info from MetaCPAN ...", $args{name});
+                    my $mcres;
+                    eval {
+                        $mcres = $mcpan->module($args{name});
+                    };
+                    if ($@) { next MOD }
+                    __dbh->do("INSERT INTO item (name, summary) VALUES (?,?)", {}, $mod, $mcres->{abstract})
+                        or do { $err = [500, "Can't insert item $mod: " . __dbh->errstr]; last WORK };
+                    $item_id = __dbh->last_insert_id(undef, undef, "item", undef);
+                }
+                $log->debugf("Adding item %s ...", $mod);
+                __dbh->do(q[INSERT INTO list_item (list_id,item_id) VALUES (?,?,?)],
+                          {},
+                          $args{id}, $item_id,
+                      ) or do { $err = [500, "Can't add item $mod: " . __dbh->errstr]; last WORK };
+            }
+        } # if $desc
     }
     __activity_log(action => 'create list', note => {name=>$args{name}, description=>$args{description}}) unless $err;
     __dbh->commit;
@@ -653,10 +694,7 @@ sub add_item {
         __dbh->do(q[INSERT INTO list_item (list_id,item_id,comment) VALUES (?,?,?)],
                   {},
                   $args{list_id}, $item_id, $args{comment},
-              ) or do {
-                  $err = [500, "Can't add item: " . __dbh->errstr];
-                  last;
-              };
+              ) or do { $err = [500, "Can't add item: " . __dbh->errstr]; last };
     }
     __activity_log(action => 'add item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{comment}}) unless $err;
     __dbh->commit;
@@ -750,6 +788,10 @@ sub update_item {
     return $err if $err;
     [200, "OK"];
 }
+
+# func: add_list_comment()
+# func: update_list_comment()?
+# func: delete_list_comment()
 
 1;
 #ABSTRACT: Application that runs on cpanlists.org
