@@ -306,6 +306,7 @@ sub list_lists {
                   l.description AS description,
                   u.username AS creator,
                   DATE_PART('epoch', l.ctime)::int AS ctime,
+                  (SELECT COUNT(*) FROM list_item WHERE list_id=l.id) AS num_items,
                   (SELECT COUNT(*) FROM list_like WHERE list_id=l.id) AS likes
                 FROM list l
                 LEFT JOIN "user" u ON l.creator=u.id];
@@ -332,7 +333,8 @@ sub list_lists {
     my @rows;
     while (my $row = $sth->fetchrow_hashref) { push @rows, $row }
 
-    [200, "OK", \@rows, {result_format_options=>{table_column_orders=>[ [qw/id name creator description/] ]}}];
+    [200, "OK", \@rows,
+     {result_format_options=>{table_column_orders=>[ [qw/id name creator description/] ]}}];
 }
 
 $SPEC{create_list} = {
