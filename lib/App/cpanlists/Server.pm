@@ -73,7 +73,7 @@ my $spec = {
             id SERIAL PRIMARY KEY,
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
             comment TEXT,
-            creator INT NOT NULL REFERENCES "user"(id),
+            creator INT REFERENCES "user"(id),
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
@@ -1016,6 +1016,57 @@ sub add_comment {
     return $err if $err;
     my $cid=__dbh->last_insert_id(undef, undef, "comment", undef);
     [200, "OK", { id=>$cid }];
+}
+
+$SPEC{update_comment} = {
+    v => 1.1,
+    summary => "Update a comment",
+    args => {
+        id => {
+            schema => ['int*'],
+            req => 1,
+            pos => 0,
+        },
+        new_comment => {
+            summary => "Comment",
+            schema => ['str*'],
+            description => <<'_',
+
+If not specified, comment will not be replaced.
+
+Will be interpreted as Markdown.
+
+_
+        },
+    },
+    "_perinci.sub.wrapper.validate_args" => 0,
+};
+sub update_comment {
+    my %args = @_; # VALIDATE_ARGS
+    my $desc = $args{description};
+
+    __dbh->begin_work;
+    my $err;
+
+  WORK:
+    {
+        my $sql = "UPDATE comment SET";
+        my @params;
+        if (exists $args{new_comment}) {
+            $sql .= (@params ? ", ":" ") . " comment=?";
+            push @params, $args{new_comment};
+        }
+        if (!@params) { $err = [304, "Nothing is changed"]; last }
+        $sql .= ",mtime=CURRENT_TIMESTAMP";
+        $sql .= " WHERE id=?";
+        push @params, $args{id};
+        my $n = __dbh->do($sql, {}, @params) or do { $err = [500, "Can't update ccomment: " . __dbh->errstr]; last };
+        $n+0 or do { $err = [404, "No such list"]; last };
+    }
+    __activity_log(action => 'update comment', note => {id=>$args{id}, new_comment=>$args{new_comment}}, new_tags=>$args{new_tags}) unless $err;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
+    return $err if $err;
+    [200, "OK"];
 }
 
 # XXX instead of delete row, option to replace comment with "(Deleted)"
