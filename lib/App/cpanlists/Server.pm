@@ -96,6 +96,20 @@ my $spec = {
     ],
 };
 
+my $sch_items = ['array*' => of =>
+                     ['hash*' => {
+                         keys => {
+                             name => ['str*'],
+                             comment => ['str*'],
+                         },
+                         # req_keys => [qw/name/],
+                     },
+                  ],
+             ];
+
+my $sch_tag = ['str*']; # XXX match => qr/\A[A-Za-z0-9_-]+(::[A-Za-z0-9_-]+)*\z/
+my $sch_tags = ['array*' => of => $sch_tag];
+
 sub __dbh {
     state $dbh;
     if (@_) {
@@ -300,6 +314,16 @@ $SPEC{list_lists} = {
             schema => ['int*'],
             tags => [qw/filter/],
         },
+        has_tags => {
+            summary => "Only include lists containing these tags",
+            schema => $sch_tags,
+            tags => [qw/filter/],
+        },
+        lacks_tags => {
+            summary => "Only include lists not containing these tags",
+            schema => $sch_tags,
+            tags => [qw/filter/],
+        },
     },
     "_perinci.sub.wrapper.validate_args" => 0,
 };
@@ -310,6 +334,7 @@ sub list_lists {
                   l.id AS id,
                   l.name AS name,
                   l.description AS description,
+                  l.tags AS tags,
                   (SELECT username FROM "user" u WHERE u.id=l.creator) AS creator,
                   DATE_PART('epoch', l.ctime)::int AS ctime,
                   (SELECT COUNT(*) FROM list_item WHERE list_id=l.id) AS num_items,
@@ -330,6 +355,16 @@ sub list_lists {
     }
     if (defined $args{id}) {
         push @wheres, "l.id=".__dbh->quote($args{id});
+    }
+    if ($args{has_tags}) {
+        for (@{ $args{has_tags} }) {
+            push @wheres, __dbh->quote($_)."=ANY(l.tags)";
+        }
+    }
+    if ($args{lacks_tags}) {
+        for (@{ $args{lacks_tags} }) {
+            push @wheres, "NOT(".__dbh->quote($_)."=ANY(l.tags))";
+        }
     }
     $sql .= " WHERE ".join(" AND ", map {"($_)"} @wheres) if @wheres;
     $sql .= " ORDER BY num_likes DESC, ctime DESC";
@@ -409,22 +444,17 @@ _
         },
         items => {
             summary => 'Items',
-            schema => ['array*' => of =>
-                           ['hash*' => {
-                               keys => {
-                                   name => ['str*'],
-                                   comment => ['str*'],
-                               },
-                               # req_keys => [qw/name/],
-                           },
-                        ],
-                   ],
+            schema => $sch_items,
             description => <<'_',
 
 Alternatively, you can leave this empty and add items one-by-one using
 add_item().
 
 _
+        },
+        tags => {
+            summary => 'Tags',
+            schema => $sch_tags,
         },
     },
     "_perinci.sub.wrapper.validate_args" => 0,
@@ -438,14 +468,14 @@ sub create_list {
     my @items;
     my $lid;
 
-    push @items, {name=>$_->{name}, comment=>$_->{comment}} for @{ $args{items} };
+    push @items, {name=>$_->{name}, comment=>$_->{comment}} for @{ $args{items} // [] };
 
   WORK:
     {
-        __dbh->do(q[INSERT INTO list (creator, name,description) VALUES (?, ?,?)],
+        __dbh->do(q[INSERT INTO list (creator, name,description,tags) VALUES (?, ?,?,?)],
                   {},
                   (__env() ? __env->{"app.user_id"} : undef),
-                  $args{name}, $desc,
+                  $args{name}, $desc, $args{tags},
               ) or do { $err = [500, "Can't create list: " . __dbh->errstr]; last };
 
         $lid=__dbh->last_insert_id(undef, undef, "list", undef);
@@ -580,6 +610,10 @@ sub list_items {
            li.item_id AS id,
            i.name AS name,
            i.summary AS abstract,
+           i.author AS author,
+           i.dist AS dist,
+           i.version AS version,
+           i.reldate AS reldate,
            li.comment AS comment,
            DATE_PART('epoch', li.ctime)::int AS ctime
          FROM list_item li
@@ -676,6 +710,16 @@ $SPEC{update_list} = {
             schema => ['str*'],
             description => "If not specified, description will not be changed",
         },
+        new_items => {
+            summary => "List's new items",
+            schema => $sch_items,
+            description => "If not specified, items will not be changed",
+        },
+        new_tags => {
+            summary => "List's new tags",
+            schema => $sch_tags,
+            description => "If not specified, tags will not be changed",
+        },
     },
     "_perinci.sub.wrapper.validate_args" => 0,
 };
@@ -684,6 +728,8 @@ sub update_list {
 
     __dbh->begin_work;
     my $err;
+
+  WORK:
     {
         my $sql = "UPDATE list SET";
         my @params;
@@ -695,14 +741,39 @@ sub update_list {
             $sql .= (@params ? ", ":" ") . " description=?";
             push @params, $args{new_description};
         }
-        if (!@params) { $err = [304, "Nothing is changed"]; last }
-        $sql .= ",mtime=CURRENT TIMESTAMP";
+        if (exists $args{new_tags}) {
+            $sql .= (@params ? ", ":" ") . " tags=?";
+            push @params, $args{new_tags};
+        }
+        if (!@params && !$args{new_items}) { $err = [304, "Nothing is changed"]; last }
+        $sql .= ",mtime=CURRENT_TIMESTAMP";
         $sql .= " WHERE id=?";
         push @params, $args{id};
         my $n = __dbh->do($sql, {}, @params) or do { $err = [500, "Can't update list: " . __dbh->errstr]; last };
-        $n+0 or do { $err = [404, "No such list"]; last }
+        $n+0 or do { $err = [404, "No such list"]; last };
+
+        if ($args{new_items}) {
+            __dbh->do("DELETE FROM list_item WHERE list_id=?", {}, $args{id})
+                or do { $err = [500, "Can't delete old items: " . __dbh->errstr]; last WORK };
+
+            for my $item (@{ $args{new_items} }) {
+                my $item_id = $item->{id};
+                unless ($item_id) {
+                    my $iteminfo = __get_item($item->{name});
+                    if (!$iteminfo) {
+                        $err = [500, "Can't find module $item->{name}"];
+                        last WORK;
+                    }
+                    $item_id = $iteminfo->{id};
+                }
+                __dbh->do(q[INSERT INTO list_item (list_id,item_id,comment) VALUES (?,?,?)],
+                          {},
+                          $args{id}, $item_id, $item->{comment},
+                      ) or do { $log->errorf("Can't add item %s: %s", $item->{name}, __dbh->errstr); last WORK };
+            }
+        }
     }
-    __activity_log(action => 'update list', note => {list_id=>$args{list_id}, new_name=>$args{new_name}, new_description=>$args{new_description}}) unless $err;
+    __activity_log(action => 'update list', note => {list_id=>$args{list_id}, new_name=>$args{new_name}, new_description=>$args{new_description}, new_items=>$args{new_items}, new_tags=>$args{new_tags}}) unless $err;
     if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
@@ -829,7 +900,7 @@ sub update_item {
             push @params, $args{new_comment};
         }
         if (!@params) { $err = [304, "No changes"]; last }
-        $sql .= ",mtime=CURRENT TIMESTAMP";
+        $sql .= ",mtime=CURRENT_TIMESTAMP";
         $sql .= " WHERE list_id=? AND item_id=(SELECT id FROM item WHERE name=?)";
         push @params, $args{list_id}, $args{name};
         my $n = __dbh->do($sql, {}, @params)
