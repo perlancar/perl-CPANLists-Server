@@ -39,18 +39,23 @@ my $spec = {
 
         q[CREATE TABLE list (
             id SERIAL PRIMARY KEY,
-            creator INT NOT NULL REFERENCES "user"(id),
+            creator INT REFERENCES "user"(id),
             name VARCHAR(255) NOT NULL, UNIQUE(name), -- citext
             -- XXX type: module, author
             description TEXT,
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            tags TEXT[]
         )],
 
         q[CREATE TABLE item (
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL, UNIQUE(name),
             summary TEXT,
+            author  VARCHAR(64),  -- cpan-specific
+            dist    VARCHAR(255), -- cpan-specific
+            version VARCHAR(64),  -- cpan-specific
+            reldate DATE,         -- cpan-specific, release-time
             note TEXT,
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -76,7 +81,7 @@ my $spec = {
         q[CREATE TABLE list_like (
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
             user_id INT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
-            UNIQUE(item_id, user_id),
+            UNIQUE(list_id, user_id),
             -- XXX UNIQUE(user_id),
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
@@ -197,7 +202,7 @@ sub create_user {
               };
     }
     __activity_log(action => 'create user', note => {username=>$args{username}}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK", { id=>__dbh->last_insert_id(undef, undef, "user", undef) }];
 }
@@ -339,6 +344,36 @@ sub list_lists {
      {result_format_options=>{table_column_orders=>[ [qw/id name creator description/] ]}}];
 }
 
+sub __get_item {
+    my $mod = shift;
+
+    my $row = __dbh->selectrow_hashref("SELECT * FROM item WHERE name=?", {}, $mod);
+    return $row if $row;
+
+    # if not already exist, fetch from MetaCPAN
+    $log->debugf("Fetching module '%s' info from MetaCPAN ...", $mod);
+    my $mcres;
+    eval {
+        $mcres = $mcpan->module($mod);
+    };
+    return undef if $@;
+    my $reldate = $mcres->{date} =~ /^(\d\d\d\d)-(\d\d)-(\d\d)T/ ? "$1-$2-$3" : undef;
+    $row = {
+        name    => $mod,
+        summary => $mcres->{abstract},
+        author  => $mcres->{author},
+        dist    => $mcres->{distribution},
+        version => $mcres->{version_numified},
+        reldate => $reldate,
+    };
+    $log->debugf("Adding item %s ...", $mod);
+    __dbh->do("INSERT INTO item (name, summary,author,dist,version,reldate) VALUES (?, ?,?,?,?,?)", {}, $mod,
+              $row->{summary}, $row->{author}, $row->{dist}, $row->{version}, $row->{reldate})
+        or do { $log->errorf("Can't insert item %s: %s", $mod, __dbh->errstr); last WORK };
+    $row->{id} = __dbh->last_insert_id(undef, undef, "item", undef);
+    return $row;
+}
+
 $SPEC{create_list} = {
     v => 1.1,
     summary => 'Create a new list',
@@ -367,6 +402,30 @@ be detected and added as items if indeed are CPAN module names.
 
 _
         },
+        scan_modules_from_description => {
+            summary => 'Whether to scan module names from description '.
+                'and add them as items',
+            schema => [bool => default => 0],
+        },
+        items => {
+            summary => 'Items',
+            schema => ['array*' => of =>
+                           ['hash*' => {
+                               keys => {
+                                   name => ['str*'],
+                                   comment => ['str*'],
+                               },
+                               # req_keys => [qw/name/],
+                           },
+                        ],
+                   ],
+            description => <<'_',
+
+Alternatively, you can leave this empty and add items one-by-one using
+add_item().
+
+_
+        },
     },
     "_perinci.sub.wrapper.validate_args" => 0,
 };
@@ -376,58 +435,55 @@ sub create_list {
 
     __dbh->begin_work;
     my $err;
+    my @items;
+    my $lid;
 
-    {
-        __dbh->do(q[INSERT INTO list (creator,name,description) VALUES (?,?,?)],
-                  {},
-                  __env->{"app.user_id"}, $args{name}, $desc,
-              ) or do { $err = [500, "Can't create list: " . __dbh->errstr]; last };
+    push @items, {name=>$_->{name}, comment=>$_->{comment}} for @{ $args{items} };
 
-    }
-    __activity_log(action => 'create list', note => {name=>$args{name}, description=>$args{description}}) unless $err;
-    __dbh->commit;
-    return $err if $err;
-    my $lid=__dbh->last_insert_id(undef, undef, "list", undef);
-
-    # try to detect module names from text, and add them as items
-    __dbh->begin_work;
   WORK:
     {
-        if ($desc) {
+        __dbh->do(q[INSERT INTO list (creator, name,description) VALUES (?, ?,?)],
+                  {},
+                  (__env() ? __env->{"app.user_id"} : undef),
+                  $args{name}, $desc,
+              ) or do { $err = [500, "Can't create list: " . __dbh->errstr]; last };
+
+        $lid=__dbh->last_insert_id(undef, undef, "list", undef);
+
+        # try to detect module names from text, and add them as items
+        if ($args{scan_modules_from_description} && $desc) {
             my @mods;
             while ($desc =~ m!(\w+(?:::\w+)+) | mod://(\w+(?:::\w+)*)!gx) {
                 my $mod = $1 // $2;
                 push @mods, $mod;
             }
             $log->debugf("Detected module name(s) %s", \@mods);
-          MOD:
             for my $mod (@mods) {
-                my $row = __dbh->selectrow_hashref("SELECT * FROM item WHERE name=?", {}, $mod);
-                my $item_id;
-
-                # if not already exist, fetch from MetaCPAN
-                if ($row) {
-                    $item_id = $row->{id};
-                } else {
-                    $log->debugf("Fetching module '%s' info from MetaCPAN ...", $mod);
-                    my $mcres;
-                    eval {
-                        $mcres = $mcpan->module($mod);
-                    };
-                    if ($@) { next MOD }
-                    __dbh->do("INSERT INTO item (name, summary) VALUES (?,?)", {}, $mod, $mcres->{abstract})
-                        or do { $log->errorf("Can't insert item %s: %s", $mod, __dbh->errstr); last WORK };
-                    $item_id = __dbh->last_insert_id(undef, undef, "item", undef);
-                }
-                $log->debugf("Adding item %s ...", $mod);
-                __dbh->do(q[INSERT INTO list_item (list_id,item_id) VALUES (?,?)],
-                          {},
-                          $lid, $item_id,
-                      ) or do { $log->errorf("Can't add item %s: %s", $mod, __dbh->errstr); last WORK };
+                my $iteminfo = __get_item($_) for @mods;
+                push @items, {name=>$mod, id=>$iteminfo->{id}} unless (grep {$_->{name} eq $mod} @items);
             }
-        } # if $desc
+        }
+
+        # add the items
+        for my $item (@items) {
+            my $item_id = $item->{id};
+            unless ($item_id) {
+                my $iteminfo = __get_item($item->{name});
+                if (!$iteminfo) {
+                    $err = [500, "Can't find module $item->{name}"];
+                    last WORK;
+                }
+                $item_id = $iteminfo->{id};
+            }
+            __dbh->do(q[INSERT INTO list_item (list_id,item_id,comment) VALUES (?,?,?)],
+                      {},
+                      $lid, $item_id, $item->{comment},
+                  ) or do { $log->errorf("Can't add item %s: %s", $item->{name}, __dbh->errstr); last WORK };
+        }
     }
-    __dbh->commit;
+    __activity_log(action => 'create list', note => {name=>$args{name}, description=>$args{description}, items=>\@items}) unless $err;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
+    return $err if $err;
 
     [200, "OK", { id=>$lid }];
 }
@@ -455,7 +511,7 @@ sub like_list {
 
     my $err;
     my $lid = $args{id};
-    my $uid = __env->{"app.user_id"};
+    my $uid = __env() ? __env->{"app.user_id"} : undef; return [412, "Please supply app.user_id in PSGI env"] unless $uid;
     __dbh->begin_work;
     {
         my $res = __dbh->do(q[UPDATE list_like SET list_id=list_id WHERE list_id=? AND user_id=?], {}, $lid, $uid);
@@ -468,7 +524,7 @@ sub like_list {
         }
     }
     #__activity_log(action => 'like list', note => {id=>$lid}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
@@ -493,14 +549,14 @@ sub unlike_list {
 
     my $err;
     my $lid = $args{id};
-    my $uid = __env->{"app.user_id"};
+    my $uid = __env() ? __env->{"app.user_id"} : undef; return [412, "Please supply app.user_id in PSGI env"] unless $uid;
     #__dbh->begin_work;
     {
         my $res = __dbh->do(q[DELETE FROM list_like WHERE list_id=? AND user_id=?], {}, $lid, $uid);
         if (!$res) { $err = [500, "Can't delete: " . __dbh->errstr]; last }
     }
     #__activity_log(action => 'unlike list', note => {id=>$lid}) unless $err;
-    #__dbh->commit;
+    #if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
@@ -596,7 +652,7 @@ sub delete_list {
               ) or do { $err = [500, "Can't delete list: " . __dbh->errstr]; last };
     }
     __activity_log(action => 'delete list', note => {list_id=>$args{list_id}, name=>$args{name}, reason=>$args{reason}}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
@@ -647,7 +703,7 @@ sub update_list {
         $n+0 or do { $err = [404, "No such list"]; last }
     }
     __activity_log(action => 'update list', note => {list_id=>$args{list_id}, new_name=>$args{new_name}, new_description=>$args{new_description}}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
@@ -681,33 +737,20 @@ sub add_item {
 
     __dbh->begin_work;
     my $err;
+  WORK:
     {
-        # first of all, find the item's name in the database
-        my $row = __dbh->selectrow_hashref("SELECT * FROM item WHERE name=?", {}, $args{name});
-        my $item_id;
-
-        # if not already exist, fetch from MetaCPAN
-        if ($row) {
-            $item_id = $row->{id};
-        } else {
-            $log->debugf("Fetching module '%s' info from MetaCPAN ...", $args{name});
-            my $mcres;
-            eval {
-                $mcres = $mcpan->module($args{name});
-            };
-            if ($@) { $err = [500, "Can't query MetaCPAN for module '$args{name}', probably not found: $@"]; last }
-            __dbh->do("INSERT INTO item (name, summary) VALUES (?,?)", {}, $args{name}, $mcres->{abstract})
-                or do { $err = [500, "Can't insert item: " . __dbh->errstr]; last };
-            $item_id = __dbh->last_insert_id(undef, undef, "item", undef);
+        my $iteminfo = __get_item($args{name});
+        unless ($iteminfo) {
+            $err = [500, "Can't find module $args{name}"];
+            last WORK;
         }
-
         __dbh->do(q[INSERT INTO list_item (list_id,item_id,comment) VALUES (?,?,?)],
                   {},
-                  $args{list_id}, $item_id, $args{comment},
+                  $args{list_id}, $iteminfo->{id}, $args{comment},
               ) or do { $err = [500, "Can't add item: " . __dbh->errstr]; last };
     }
     __activity_log(action => 'add item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{comment}}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
@@ -745,7 +788,7 @@ sub delete_item {
               };
     }
     __activity_log(action => 'delete item', note => {list_id=>$args{list_id}, name=>$args{name}}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
@@ -794,7 +837,7 @@ sub update_item {
         $n+0 or do { $err = [404, "No such item"]; last }
     }
     __activity_log(action => 'update item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{new_comment}}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
@@ -898,7 +941,7 @@ sub add_comment {
 
     }
     __activity_log(action => 'add comment', note => {list_id=>$args{list_id}, comment=>$args{comment}}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     my $cid=__dbh->last_insert_id(undef, undef, "comment", undef);
     [200, "OK", { id=>$cid }];
@@ -933,7 +976,7 @@ sub delete_comment {
               ) or do { $err = [500, "Can't delete comment: " . __dbh->errstr]; last };
     }
     __activity_log(action => 'delete comment', note => {id=>$args{id}, reason=>$args{reason}}) unless $err;
-    __dbh->commit;
+    if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }

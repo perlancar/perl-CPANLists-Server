@@ -16,7 +16,7 @@ use App::cpanlists::Server;
 my $json = JSON->new->allow_nonref;
 my $home = (getpwuid($>))[7];  # $ENV{HOME} is empty if via fcgi
 my $conf = $json->decode(~~read_file("$home/cpanlists-server.conf.json"));
-my $dbh = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
+my $dbh  = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
     $conf->{dbuser}, $conf->{dbpass});
 App::cpanlists::Server::__dbh($dbh);
 
