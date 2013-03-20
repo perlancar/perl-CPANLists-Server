@@ -1,0 +1,11 @@
+{
+    "dbname": "...",
+    "dbuser": "...",
+    "dbpass": null,
+    "riap_access_log_dir": "/home/...",
+    "riap_access_log_prefix": "cpanlists-server.riap.log",
+    "riap_access_log_size": 10485760,
+    "riap_access_log_histories": 25,
+
+    "bitcard_token": "..."
+}
