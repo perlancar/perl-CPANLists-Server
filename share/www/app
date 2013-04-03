@@ -1,0 +1,54 @@
+#!/usr/bin/perl
+
+use Mojolicious::Lite;
+
+use App::cpanlists::Server;
+use Data::Dump;
+use DBI;
+use File::Slurp;
+use JSON;
+
+my $json = JSON->new->allow_nonref;
+my $home = (getpwuid($>))[7];  # $ENV{HOME} is empty if via fcgi
+my $conf = $json->decode(~~read_file("$home/cpanlists-server.conf.json"));
+my $dbh  = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
+    $conf->{dbuser}, $conf->{dbpass});
+App::cpanlists::Server::__dbh($dbh);
+
+get '/' => {text=>'hello, world!'};
+get '/front';
+
+app->start;
+
+=head1 SYNOPSIS
+
+To deploy as FastCGI script, see INSTALL.org. This will require a restart
+(killing the FCGI process) whenever we modify the application.
+
+For testing, you can run:
+
+ % morbo app
+
+
+=head1 DESCRIPTION
+
+=cut
+
+__DATA__
+
+@@ front.html.ep
+% title 'test';
+% layout 'main';
+
+test content
+
+@@ layouts/main.html.ep
+<html>
+  <head>
+    <title><%= title %></title>
+  </head>
+  <body>
+    <%= content %>
+  </body>
+</html>
+
