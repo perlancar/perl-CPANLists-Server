@@ -18,6 +18,8 @@ App::cpanlists::Server::__dbh($dbh);
 get '/' => {text=>'hello, world!'};
 get '/front';
 
+# this script is meant to be run as fastcgi, or under 'morbo' or 'plackup'
+@ARGV = ('fastcgi') unless $ENV{PLACK_ENV} || $ENV{MORBO_REV};
 app->start;
 
 =head1 SYNOPSIS

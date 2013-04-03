@@ -9,5 +9,5 @@ RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule ^api(/.*)$       dispatch.fcgi/api.psgi$1 [QSA,L]
 # mod_rewrite is weird?
-RewriteRule ^([a-z0-9]+)$    dispatch.fcgi/app.psgi/$1 [QSA,L]
-RewriteRule ^([a-z0-9]+/.*)$ dispatch.fcgi/app.psgi/$1 [QSA,L]
+RewriteRule ^([a-z0-9]+)$    app.fcgi/$1 [QSA,L]
+RewriteRule ^([a-z0-9]+/.*)$ app.fcgi/$1 [QSA,L]
