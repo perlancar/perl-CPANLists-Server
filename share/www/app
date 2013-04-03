@@ -45,7 +45,8 @@ test content
 @@ layouts/main.html.ep
 <html>
   <head>
-    <title><%= title %></title>
+    <meta charset="UTF-8">
+    <title><%= title %> - CPAN Lists</title>
   </head>
   <body>
     <%= content %>
