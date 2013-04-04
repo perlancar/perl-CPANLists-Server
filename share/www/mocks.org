@@ -1,0 +1,60 @@
+* page: lists (newest)
+:   My favorite modules  by Steven Haryanto (23 minutes ago)
+:     "description of the list"
+:     Foo::Bar   Foo::Baz   HTML::Parser  HTML::Foo   (and 12 others)           [list of modules mentioned]
+- tags
+- should we just display the whole content of the lists on this page? except
+  comments.
+- number of likes, number of comments
+* page: list detail page
+- list name, author, time/last update
+- description
+- modules with each of their description
+- total number of likes for this list
+- all comments
+- related lists (by similarity of tags and modules)
+* page: lists (most likes)
+* page: lists (most commented)
+
+* page: module detail page
+
+: Org::Parser
+:                                                                     [author]
+:   "Parse Org documents"                                             [abstract]
+:
+:   Mentioned in 12 lists
+:
+:   My favorite modules  by Steven Haryanto (written 234 days ago)
+:     along with Regexp::Grammars, Moo, and 23 others
+:
+:   Modules I wrote  by Steven Haryanto (written 230 days ago)
+:     "This one also uses regex, but I managed to ..."
+:     along with Perinci, Perinci::CmdLine, and 23 others
+
+- link to metacpan module page
+- link to metacpan distro page?
+* page: modules (most mentioned)
+: +-------------+-------+
+: | Module Name | Lists |
+: +-------------+-------+
+: | Org::Parser |   12  |
+: | Foo::Bar    |   10  |
+: | Baz::Qux    |    7  |
+: | ...         | ...   |
+: +-------------+-------+
+* page: user/author (most mentioned)
+: +-------------+---------+-------+
+: | User        | Modules | Lists |
+: +-------------+---------+-------+
+: | SHARYANTO   |   23    |   12  |
+: | TOBYINK     |   10    |    3
+: | AVIF        |    7    |
+: | ...         | ...     |
+: +-------------+---------+
+- modules = number of modules mentioned in all lists
+- lists = number of lists where one/more of his modules are mentioned.
+* page: user (most comments) [necessary?]
+- users who have posted the most comments
+* page: user (most lists)
+- users who have created the most lists
+* page: comment (most likes)?
