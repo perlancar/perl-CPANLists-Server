@@ -14,6 +14,7 @@ my $conf = $json->decode(~~read_file("$home/cpanlists-server.conf.json"));
 my $dbh  = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
     $conf->{dbuser}, $conf->{dbpass});
 App::cpanlists::Server::__dbh($dbh);
+App::cpanlists::Server::__init_db();
 
 app->secret($conf->{'app_secret'} // rand());
 

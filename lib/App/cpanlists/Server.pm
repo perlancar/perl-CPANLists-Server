@@ -127,9 +127,9 @@ sub __env {
 }
 
 sub __init_db {
-    SHARYANTO::SQL::Schema::create_or_update_db_schema(
-        dbh => __dbh, spec => $spec,
-    );
+    my $res = SHARYANTO::SQL::Schema::create_or_update_db_schema(
+        dbh => __dbh, spec => $spec);
+    die "Can't create/update db schema: $res->[1]" unless $res->[0] == 200;
 }
 
 sub __activity_log {
