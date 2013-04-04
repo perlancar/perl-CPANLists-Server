@@ -12,6 +12,7 @@ use Perinci::Access::Base::Patch::PeriAHS;
 use Plack::Builder;
 use Plack::Util::PeriAHS qw(errpage);
 use App::cpanlists::Server;
+use App::cpanlists::Server::SubModule; # just a dummy, test module
 
 my $json = JSON->new->allow_nonref;
 my $home = (getpwuid($>))[7];  # $ENV{HOME} is empty if via fcgi
