@@ -1,0 +1,58 @@
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title><%= title %> - CPAN Lists</title>
+    <link href="/assets/bootstrap/css/bootstrap.min.css" rel="stylesheet" media="screen">
+  </head>
+  <body>
+    <script src="/assets/jquery.min.js"></script>
+    <script src="/assets/bootstrap/js/bootstrap.min.js"></script>
+
+    <div class="navbar navbar-inverse navbar-fixed-top">
+      <div class="navbar-inner">
+        <div class="container">
+          <a class="brand" href="/">CPAN Lists</a>
+          <div class="nav-collapse">
+            <ul class="nav">
+
+              <li><a href="#" class="dropdown-toggle" data-toggle="dropdown">Lists</a> <b class="caret"></b></li>
+              <ul class="dropdown-menu">
+                <li><a href="#">Newest</a></li>
+                <li><a href="#">Most likes</a></li>
+                <li><a href="#">Most commented</a></li>
+                <li><a href="#">Mine</a></li> <!-- show lists created by me -->
+                <li><a href="#">Liked</a></li> <!-- show lists which i have liked -->
+                <li><a href="#">Commented</a></li> <!-- show lists which i have commented -->
+                <!-- <li class="divider"></li>
+                <li class="nav-header">Nav header</li>
+                <li><a href="#">Separated link</a></li>
+                <li><a href="#">One more separated link</a></li> -->
+              </ul>
+
+              <li><a href="#" class="dropdown-toggle" data-toggle="dropdown">Modules</a></li>
+              <ul class="dropdown-menu">
+                <li><a href="#">Most mentioned</a></li>
+              </ul>
+
+              <li><a href="#" class="dropdown-toggle" data-toggle="dropdown">Users</a></li>
+              <ul class="dropdown-menu">
+                <li><a href="#">Newest</a></li>
+                <li><a href="#">Most lists [sp]</a></li> <!-- users who have written the most number of lists -->
+              </ul>
+
+            </ul>
+          </div>
+
+          <form class="navbar-form pull-right">
+            <input type="text" class="span2" placeholder="Search">
+            <button type="submit" class="btn">Search</button>
+          </form>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="container"><%= content %></div>
+
+  </body>
+</html>

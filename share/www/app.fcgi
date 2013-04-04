@@ -15,8 +15,23 @@ my $dbh  = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
     $conf->{dbuser}, $conf->{dbpass});
 App::cpanlists::Server::__dbh($dbh);
 
+app->secret($conf->{'app_secret'} // rand());
+
 get '/' => {text=>'hello, world!'};
-get '/front';
+get '/test1';
+
+# the rest should go to static files
+any ["/assets/*", "images/*"] => sub {
+    my $self = shift;
+    my $rel = $self->req->url->to_rel;
+    my $path = ".$rel";
+    if (-e $path) {
+        $self->render_static($path);
+    } else {
+        $self->render_text('not found');
+        $self->rendered(404);
+    }
+};
 
 # this script is meant to be run as fastcgi, or under 'morbo' or 'plackup'
 @ARGV = ('fastcgi') unless $ENV{PLACK_ENV} || $ENV{MORBO_REV};
@@ -24,34 +39,13 @@ app->start;
 
 =head1 SYNOPSIS
 
-To deploy as FastCGI script, see INSTALL.org. This will require a restart
-(killing the FCGI process) whenever we modify the application.
-
 For testing, you can run:
 
  % morbo app
+
+For deployment, run as FastCGI (.htaccess for Apache provided).
 
 
 =head1 DESCRIPTION
 
 =cut
-
-__DATA__
-
-@@ front.html.ep
-% title 'test';
-% layout 'main';
-
-test content
-
-@@ layouts/main.html.ep
-<html>
-  <head>
-    <meta charset="UTF-8">
-    <title><%= title %> - CPAN Lists</title>
-  </head>
-  <body>
-    <%= content %>
-  </body>
-</html>
-
