@@ -19,6 +19,7 @@ my $conf = $json->decode(~~read_file("$home/cpanlists-server.conf.json"));
 my $dbh  = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
     $conf->{dbuser}, $conf->{dbpass});
 App::cpanlists::Server::__dbh($dbh);
+App::cpanlists::Server::__init_db();
 
 my $fwr = File::Write::Rotate->new(
     dir       => $conf->{riap_access_log_dir},
@@ -40,6 +41,7 @@ my $app = builder {
         #parse_path_info => $args{parse_path_info},
         #parse_form      => $args{parse_form},
         #parse_reform    => $args{parse_reform},
+        riap_uri_prefix  => '/App/cpanlists/Server',
     );
 
     enable_if(
@@ -47,7 +49,6 @@ my $app = builder {
             my $env = shift;
             my $rreq = $env->{'riap.request'};
             my $action = $rreq->{action};
-            $rreq->{uri} =~ s!\Apl:/api/!pl:/!;
             my ($mod, $func) = $rreq->{uri} =~ m!\A(?:pl:)?/(.+)/(.+)!;
             $mod //= ""; $func //= "";
 
@@ -85,8 +86,6 @@ my $app = builder {
                 my $rreq = $env->{'riap.request'};
 
                 $rreq->{uri} =~ s!\Apl:/api/!pl:/!;
-                return errpage($env, [403,"Only cpanlists functions are currently allowed"])
-                    unless $rreq->{uri} =~ m!\A(pl:)?(/App/cpanlists/Server/)!;
 
                 my ($mod, $func) = $rreq->{uri} =~ m!\A(?:pl:)?/(.+)/(.+)!;
                 $mod =~ s!/!::!g;
