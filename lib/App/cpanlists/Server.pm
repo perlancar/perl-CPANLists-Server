@@ -9,7 +9,6 @@ use Log::Any qw($log);
 
 use JSON;
 use MetaCPAN::API;
-#use Perinci::Sub::Util qw(wrapres);
 use SHARYANTO::SQL::Schema 0.04;
 
 # TODO: use CITEXT columns when migrating to postgres 9.1+
