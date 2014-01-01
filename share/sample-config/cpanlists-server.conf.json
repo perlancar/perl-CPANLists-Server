@@ -1,5 +1,5 @@
 {
-    "dbname": "...",
+    "dbdsn": "...",
     "dbuser": "...",
     "dbpass": null,
     "riap_access_log_dir": "/home/...",
