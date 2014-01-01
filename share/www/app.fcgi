@@ -17,7 +17,7 @@ my $dbh  = DBI->connect($conf->{dbdsn} ? $conf->{dbdsn} :
 CPANLists::Server::__dbh($dbh);
 CPANLists::Server::__init_db();
 
-app->secret($conf->{'app_secret'} // rand());
+app->{secrets} = [$conf->{'app_secret'} // rand()];
 
 get '/' => {text=>'hello, world!'};
 get '/test1';
