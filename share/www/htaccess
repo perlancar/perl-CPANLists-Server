@@ -1,0 +1,13 @@
+<files "*.psgi">
+  order allow,deny
+  deny from all
+</files>
+
+RewriteEngine On
+RewriteBase /
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^api(/.*)$       dispatch.fcgi/api.psgi$1 [QSA,L]
+# mod_rewrite is weird?
+RewriteRule ^([a-z0-9]+)$    app.fcgi/$1 [QSA,L]
+RewriteRule ^([a-z0-9]+/.*)$ app.fcgi/$1 [QSA,L]

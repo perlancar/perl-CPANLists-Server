@@ -1,0 +1,3 @@
+Currently File::ShareDir::Install skips installing dotfiles, so I copy .htaccess
+to htaccess too for the time being. Rename it to .htaccess in your docroot when
+deploying.
