@@ -2,7 +2,7 @@
 
 use Mojolicious::Lite;
 
-use App::cpanlists::Server;
+use CPANLists::Server;
 use Data::Dump;
 use DBI;
 use File::Slurp;
@@ -13,8 +13,8 @@ my $home = (getpwuid($>))[7];  # $ENV{HOME} is empty if via fcgi
 my $conf = $json->decode(~~read_file("$home/cpanlists-server.conf.json"));
 my $dbh  = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
     $conf->{dbuser}, $conf->{dbpass});
-App::cpanlists::Server::__dbh($dbh);
-App::cpanlists::Server::__init_db();
+CPANLists::Server::__dbh($dbh);
+CPANLists::Server::__init_db();
 
 app->secret($conf->{'app_secret'} // rand());
 

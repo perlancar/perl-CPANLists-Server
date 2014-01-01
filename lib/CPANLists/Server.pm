@@ -1,4 +1,4 @@
-package App::cpanlists::Server;
+package CPANLists::Server;
 
 use 5.010001;
 use strict;
@@ -1125,13 +1125,13 @@ change in the future.
 =item * Set database handle at startup
 
  $dbh = DBI->connect(...);
- App::cpanlists::Server::__dbh($dbh);
+ CPANLists::Server::__dbh($dbh);
 
 =item * Set PSGI environment for each request
 
 Mainly so that __activity_log() can get REMOTE_ADDR etc from PSGI environment.
 
- App::cpanlists::Server::__env($env);
+ CPANLists::Server::__env($env);
 
 =back
 

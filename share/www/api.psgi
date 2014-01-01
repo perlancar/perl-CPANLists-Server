@@ -11,16 +11,15 @@ use JSON;
 use Perinci::Access::Base::Patch::PeriAHS;
 use Plack::Builder;
 use Plack::Util::PeriAHS qw(errpage);
-use App::cpanlists::Server;
-use App::cpanlists::Server::SubModule; # just a dummy, test module
+use CPANLists::Server;
 
 my $json = JSON->new->allow_nonref;
 my $home = (getpwuid($>))[7];  # $ENV{HOME} is empty if via fcgi
 my $conf = $json->decode(~~read_file("$home/cpanlists-server.conf.json"));
 my $dbh  = DBI->connect("dbi:Pg:dbname=$conf->{dbname};host=localhost",
     $conf->{dbuser}, $conf->{dbpass}, {RaiseError=>1});
-App::cpanlists::Server::__dbh($dbh);
-App::cpanlists::Server::__init_db();
+CPANLists::Server::__dbh($dbh);
+CPANLists::Server::__init_db();
 
 my $fwr = File::Write::Rotate->new(
     dir       => $conf->{riap_access_log_dir},
@@ -42,7 +41,7 @@ my $app = builder {
         #parse_path_info => $args{parse_path_info},
         #parse_form      => $args{parse_form},
         #parse_reform    => $args{parse_reform},
-        riap_uri_prefix  => '/App/cpanlists/Server',
+        riap_uri_prefix  => '/CPANLists/Server',
     );
 
     enable_if(
@@ -68,7 +67,7 @@ my $app = builder {
             my ($user, $pass, $env) = @_;
 
             #my $role;
-            my $res = App::cpanlists::Server::auth_user(
+            my $res = CPANLists::Server::auth_user(
                 username => $user, password=>$pass);
             if ($res->[0] == 200) {
                 $env->{"REMOTE_USER"} = $user; # isn't this already done by webserver?
@@ -105,7 +104,7 @@ my $app = builder {
                     # user can add item/update/delete item of lists he created
                     if ($func =~ /^(delete_list|update_list|add_item|delete_item|update_item)$/) {
                         my $lid = $func =~ /^(delete_list|update_list)$/ ? $rreq->{args}{id} : $rreq->{args}{list_id};
-                        my $res = App::cpanlists::Server::get_list(id => $lid, items=>0);
+                        my $res = CPANLists::Server::get_list(id => $lid, items=>0);
                         return errpage($env, $res) if $res->[0] != 200;
                         return errpage($env, [403, "List is not yours"])
                             unless $res->[2]{creator} eq $user;
@@ -115,7 +114,7 @@ my $app = builder {
                     # user can update/delete his own comments
                     if ($func =~ /^(delete_comment|update_comment)$/) {
                         my $cid = $rreq->{args}{id};
-                        my $res = App::cpanlists::Server::get_comment(id => $cid);
+                        my $res = CPANLists::Server::get_comment(id => $cid);
                         return errpage($env, $res) if $res->[0] != 200;
                         return errpage($env, [403, "Comment is not yours"])
                             unless $res->[2]{creator} eq $user;
@@ -126,7 +125,7 @@ my $app = builder {
                     return errpage($env, [403, "Unauthorized"]);
                 }
 
-                App::cpanlists::Server::__env($env);
+                CPANLists::Server::__env($env);
                 $app->($env);
             };
         },
@@ -146,9 +145,9 @@ For testing, you can run:
 
 To test the app:
 
- % curl http://localhost:5000/api/App/cpanlists/Server/list_lists
- % curl -u USER:PASS 'http://localhost:5000/api/App/cpanlists/Server/like_list?id=1'
- % curl -u USER:PASS 'http://localhost:5000/api/App/cpanlists/Server/unlike_list?id=1'
+ % curl http://localhost:5000/api/list_lists
+ % curl -u USER:PASS 'http://localhost:5000/api/like_list?id=1'
+ % curl -u USER:PASS 'http://localhost:5000/api/unlike_list?id=1'
 
 
 =head1 DESCRIPTION
