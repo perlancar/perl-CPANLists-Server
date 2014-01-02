@@ -9,6 +9,7 @@ use Log::Any qw($log);
 
 use JSON;
 use MetaCPAN::API;
+use Perinci::Sub::Util qw(err);
 use SHARYANTO::SQL::Schema 0.04;
 
 # TODO: use CITEXT columns when migrating to postgres 9.1+
@@ -25,50 +26,76 @@ my $spec = {
         q[CREATE TABLE "user" (
             id SERIAL PRIMARY KEY,
             -- roles TEXT[],
-            username VARCHAR(64) NOT NULL, UNIQUE(username),
+
+            orig_username VARCHAR(64) NOT NULL, --username at origin site
+            origin VARCHAR(64), -- e.g. 'bitcard' (and later 'twitter', etc)
+            UNIQUE(origin, orig_username),
+
+            username VARCHAR(64) NOT NULL, UNIQUE(username), -- username at our site, XXX citext
             first_name VARCHAR(128),
             last_name VARCHAR(128),
-            email VARCHAR(128), UNIQUE(email),
+
+            email VARCHAR(128), UNIQUE(email), -- XXX citext
             password VARCHAR(255) NOT NULL,
+            is_suspended BOOL NOT NULL DEFAULT 'f',
+
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            -- XXX is_suspended BOOL,
             note TEXT
         )],
 
         q[CREATE TABLE list (
             id SERIAL PRIMARY KEY,
             creator INT REFERENCES "user"(id),
-            name VARCHAR(255) NOT NULL, UNIQUE(name), -- citext
-            -- XXX type: module, author
+            name VARCHAR(255) NOT NULL, -- XXX citext
+            type CHAR(1) NOT NULL CHECK (type IN ('m','a')), -- list of (m)odules, or (a)uthors
             description TEXT,
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             tags TEXT[]
         )],
 
-        q[CREATE TABLE item (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR(255) NOT NULL, UNIQUE(name),
-            summary TEXT,
-            author  VARCHAR(64),  -- cpan-specific
-            dist    VARCHAR(255), -- cpan-specific
-            version VARCHAR(64),  -- cpan-specific
-            reldate DATE,         -- cpan-specific, release-time
-            note TEXT,
+        q[CREATE TABLE author (
+            id VARCHAR(64) PRIMARY KEY, -- cpan ID
+            name VARCHAR(255) NOT NULL,
+            note TEXT,            -- our internal note, if any
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
 
-        q[CREATE TABLE list_item (
+        q[CREATE TABLE module (
+            name VARCHAR(255) NOT NULL, UNIQUE(name),
+            summary TEXT,         -- from cpan
+            author  VARCHAR(64),  -- from cpan, XXX REFERENCES author(name)
+            dist    VARCHAR(255), -- from cpan, dist name
+            version VARCHAR(64),  -- from cpan, latest version
+            reldate DATE,         -- from cpan, latest release date
+            note TEXT,            -- our internal note, if any
+            ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )],
+
+        q[CREATE TABLE author_list_item (
+            creator INT REFERENCES "user"(id),
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
-            item_id INT NOT NULL REFERENCES item(id), UNIQUE(list_id, item_id),
+            author_id VARCHAR(64) NOT NULL REFERENCES author(id), UNIQUE(list_id, author_id),
+            rating INT CHECK (rating BETWEEN 1 AND 5),
             comment TEXT,
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
 
-        q[CREATE TABLE comment (
+        q[CREATE TABLE module_list_item (
+            creator INT REFERENCES "user"(id),
+            list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
+            module_name VARCHAR(255) NOT NULL REFERENCES module(name), UNIQUE(list_id, module_name),
+            rating INT CHECK (rating BETWEEN 1 AND 5),
+            comment TEXT,
+            ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )],
+
+        q[CREATE TABLE list_comment (
             id SERIAL PRIMARY KEY,
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
             comment TEXT,
@@ -87,11 +114,14 @@ my $spec = {
 
         q[CREATE TABLE activity_log (
             user_id INT REFERENCES "user"(id),
-            action VARCHAR(32),
+            action VARCHAR(32) NOT NULL,
+            param TEXT, -- additional info to, e.g. module name, etc
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             ip INET,
             note TEXT
         )],
+
+        q[CREATE INDEX activity_log_ctime ON activity_log (ctime)],
     ],
 };
 
@@ -125,19 +155,29 @@ sub __env {
     $env;
 }
 
+sub __conf {
+    state $conf;
+    if (@_) {
+        $conf = $_[0];
+    }
+    $conf;
+}
+
 sub __init_db {
     my $res = SHARYANTO::SQL::Schema::create_or_update_db_schema(
         dbh => __dbh, spec => $spec);
     die "Can't create/update db schema: $res->[1]" unless $res->[0] == 200;
 }
 
+# args: action*, param
 sub __activity_log {
     my %args = @_;
 
-    if (__dbh()->do(q[INSERT INTO activity_log (ip,action,"user_id",note) VALUES (?,?,?,?)],
+    if (__dbh()->do(q[INSERT INTO activity_log (ip,action,param,"user_id",note) VALUES (?,?,?,?,?)],
              {},
              (__env() ? __env->{REMOTE_ADDR} : $ENV{REMOTE_ADDR}),
              $args{action},
+             $args{param},
              (__env() ? __env->{"app.user_id"} : undef),
              (ref($args{note}) ? $json->encode($args{note}) : $args{note}),
             )) {
@@ -189,12 +229,11 @@ $SPEC{create_user} = {
             schema => ['str'],
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub create_user {
     require Authen::Passphrase::BlowfishCrypt;
 
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     # TMP
     $args{username} =~ /\A\w+\z/ or return [400, "Invalid username syntax"];
@@ -206,7 +245,7 @@ sub create_user {
     {
         __dbh->do(q[INSERT INTO "user" (username,email,password, first_name,last_name, note) VALUES (?,?,?, ?,?, ?)],
                   {},
-                  $args{username}, $args{email}, $ppr->as_crypt,
+                  $args{username}, lc($args{email}), $ppr->as_crypt,
                   $args{first_name}, $args{last_name},
                   $args{note},
               ) or do {
@@ -220,6 +259,89 @@ sub create_user {
     [200, "OK", { id=>__dbh->last_insert_id(undef, undef, "user", undef) }];
 }
 
+sub __gen_random_pass {
+    join("", map {("a".."z","A".."Z",0..9)[62*rand()]} 1..10);
+}
+
+$SPEC{get_bitcard_signin_url} = {
+    v => 1.1,
+    summary => "Get signin URL via BitCard API (bitcard.org)",
+    description => <<'_',
+
+To signin via BitCard, first call this function. You will get login URL (to
+bitcard.org). Go to the login URL and enter your credentials. Afterwards, if the
+login is correct, you will get return URL like, which you need to follow:
+
+    https://cpanlists.org/api/verify_bitcard_signin?bc_confirmed=1&...
+
+Either follow this URL, or pass the parameters to the `verify_bitcard_signin`
+function yourself. If signin is verified, a success status (200) will be
+returned along with session key to use. Session key can be used in API calls
+e.g.:
+
+    http://cpanlists.org/api/SOME_FUNC?-riap-sesskey=...&PARAM1=...&...
+
+_
+    args => {
+    },
+};
+sub get_bitcard_signin_url {
+    require Authen::Bitcard;
+
+    my %args = @_;
+
+    my $bc = Authen::Bitcard->new;
+    $bc->token(__conf->{bitcard_token});
+    $bc->info_required([qw/username email/]);
+    my $p = "/api/verify_bitcard_signin";
+    my $returl = "https://cpanlists.org$p";
+    my $url = $bc->login_url(r => $returl);
+    return [500, "Can't get login URL"] unless $url;
+    [200, "OK", $url];
+}
+
+my @bc_params = qw(
+                      bc_confirmed bc_email bc_fields bc_id bc_name bc_sig bc_ts
+                      bc_username bc_version
+              );
+
+$SPEC{verify_bitcard_signin} = {
+    v => 1.1,
+    summary => "Verify URL parameters returned by BitCard",
+    description => <<'_',
+
+See `get_bitcard_signin_url` for more information on signing in via BitCard.
+
+_
+    args => {
+        map {$_=>{}} @bc_params,
+    },
+};
+sub verify_bitcard_signin {
+    require Authen::Bitcard;
+
+    my %args = @_;
+
+    my $bc = Authen::Bitcard->new;
+    $bc->token(__conf->{bitcard_token});
+    my $vres = $bc->verify(\%args);
+    return [403, "Verification failed: " . $bc->errstr] unless $vres;
+
+    # create user on our site, if not already exist
+    my $email = lc($vres->{email});
+    my $res = get_user(email => $email);
+    if ($res->[0] == 200) {
+        # user already exist, skip creating
+        return [200, "OK", "session_key"];
+    } elsif ($res->[0] == 404) {
+        # user does not exist, create
+        # XXX
+        return [200, "OK"];
+    } else {
+        return err($res, 500, "Can't get user");
+    }
+}
+
 $SPEC{get_user} = {
     v => 1.1,
     summary => 'Get user information either by email or username',
@@ -231,10 +353,9 @@ $SPEC{get_user} = {
             schema => ['str*'],
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub get_user {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
     # TMP, schema
     $args{username} || $args{email}
         or return [400, "Please specify either email/username"];
@@ -277,12 +398,11 @@ Upon success, will return a hash of information, currently: `id` (user numeric
 ID), `email`.
 
 _
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub auth_user {
     require Authen::Passphrase;
 
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     my $row = __dbh->selectrow_hashref(q[SELECT password,id,email FROM "user" WHERE username=?], {}, $args{username});
     return [403, "Authentication failed (1)"] unless $row;
@@ -309,6 +429,12 @@ $SPEC{list_lists} = {
             schema => ['str*'],
             tags => [qw/filter/],
         },
+        type => {
+            schema => ['str*', in=>['m','a']],
+            summary => 'Filter only certain type of lists ("a" means '.
+                'lists of authors only, "m" means lists of modules only)',
+            tags => [qw/filter/],
+        },
         id => {
             schema => ['int*'],
             tags => [qw/filter/],
@@ -324,21 +450,21 @@ $SPEC{list_lists} = {
             tags => [qw/filter/],
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub list_lists {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     my $sql = q[SELECT
                   l.id AS id,
                   l.name AS name,
+                  l.type AS type,
                   l.description AS description,
                   l.tags AS tags,
                   (SELECT username FROM "user" u WHERE u.id=l.creator) AS creator,
                   DATE_PART('epoch', l.ctime)::int AS ctime,
-                  (SELECT COUNT(*) FROM list_item WHERE list_id=l.id) AS num_items,
+                  (SELECT COUNT(*) FROM author_list_item WHERE list_id=l.id)+(SELECT COUNT(*) FROM module_list_item WHERE list_id=l.id) AS num_items,
                   (SELECT COUNT(*) FROM list_like WHERE list_id=l.id) AS num_likes,
-                  (SELECT COUNT(*) FROM comment   WHERE list_id=l.id) AS num_comments
+                  (SELECT COUNT(*) FROM list_comment WHERE list_id=l.id) AS num_comments
                 FROM list l
             ];
     my @wheres;
@@ -348,6 +474,10 @@ sub list_lists {
         my $qq = __dbh->quote(lc $q);
         $qq =~ s/\A'//; $qq =~ s/'\z//;
         push @wheres, "LOWER(l.name) LIKE '%$qq%' OR LOWER(l.description) LIKE '%$qq%'";
+    }
+    if ($args{type}) {
+        push @wheres, "l.type='a'" if $args{type} eq 'a';
+        push @wheres, "l.type='m'" if $args{type} eq 'm';
     }
     if (defined $args{creator}) {
         push @wheres, "l.creator=".__dbh->quote($args{creator});
@@ -456,10 +586,9 @@ _
             schema => $sch_tags,
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub create_list {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
     my $desc = $args{description};
 
     __dbh->begin_work;
@@ -533,10 +662,9 @@ _
             pos => 0,
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub like_list {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     my $err;
     my $lid = $args{id};
@@ -571,10 +699,9 @@ _
             pos => 0,
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub unlike_list {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     my $err;
     my $lid = $args{id};
@@ -600,10 +727,10 @@ $SPEC{list_items} = {
             pos => 0,
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub list_items {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
+
     my $sth = __dbh->prepare(
         "SELECT
            li.item_id AS id,
@@ -641,10 +768,10 @@ $SPEC{get_list} = {
             schema => ['bool*', default => 1],
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub get_list {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
+
     my $res = list_lists(id => $args{id});
     return "Can't list items: $res->[0] - $res->[1]" if $res->[0] != 200;
     return [404, "No such list"] unless @{$res->[2]};
@@ -671,10 +798,9 @@ $SPEC{delete_list} = {
             schema => ['str*'],
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub delete_list {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     __dbh->begin_work;
     my $err;
@@ -720,10 +846,9 @@ $SPEC{update_list} = {
             description => "If not specified, tags will not be changed",
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub update_list {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     __dbh->begin_work;
     my $err;
@@ -800,10 +925,9 @@ $SPEC{add_item} = {
             description => 'Will be interpreted as Markdown',
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub add_item {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     __dbh->begin_work;
     my $err;
@@ -841,10 +965,9 @@ $SPEC{delete_item} = {
             pos => 1,
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub delete_item {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     __dbh->begin_work;
     my $err;
@@ -884,10 +1007,9 @@ $SPEC{update_item} = {
             description => "If not specified, comment will not be changed",
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub update_item {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     __dbh->begin_work;
     my $err;
@@ -922,10 +1044,10 @@ $SPEC{get_comment} = {
             pos => 0,
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub get_comment {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
+
     my $row = __dbh->selectrow_hashref(
         q[SELECT
            c.id AS id,
@@ -955,10 +1077,10 @@ $SPEC{list_comments} = {
             tags => [qw/filter/],
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub list_comments {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
+
     my $sth = __dbh->prepare(
         q[SELECT
            c.id AS id,
@@ -993,10 +1115,10 @@ $SPEC{add_comment} = {
             description => 'Will be interpreted as Markdown',
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub add_comment {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
+
     my $desc = $args{description};
 
     __dbh->begin_work;
@@ -1038,10 +1160,10 @@ Will be interpreted as Markdown.
 _
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub update_comment {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
+
     my $desc = $args{description};
 
     __dbh->begin_work;
@@ -1083,10 +1205,9 @@ $SPEC{delete_comment} = {
             schema => ['str*'],
         },
     },
-    "_perinci.sub.wrapper.validate_args" => 0,
 };
 sub delete_comment {
-    my %args = @_; # VALIDATE_ARGS
+    my %args = @_;
 
     __dbh->begin_work;
     my $err;

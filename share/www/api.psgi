@@ -21,6 +21,7 @@ my $dbh  = DBI->connect($conf->{dbdsn} ? $conf->{dbdsn} :
                         $conf->{dbuser}, $conf->{dbpass}, {RaiseError=>0});
 CPANLists::Server::__dbh($dbh);
 CPANLists::Server::__init_db();
+CPANLists::Server::__conf($conf); # XXX for security, it's better to not let webapp see db credentials
 
 my $fwr = File::Write::Rotate->new(
     dir       => $conf->{riap_access_log_dir},
@@ -55,7 +56,7 @@ my $app = builder {
 
             # public actions that need not authentication
             if ($action =~ /^(meta|info|actions|list|child_metas)$/ ||
-                    $action eq 'call' && $mod eq 'App/cpanlists/Server' && $func =~ /\A(create_user|get_list|list_lists|list_items|get_comment|list_comments)\z/) {
+                    $action eq 'call' && $mod eq 'CPANLists/Server' && $func =~ /\A(get_bitcard_signin_url|verify_bitcard_signin|get_list|list_lists|list_items|get_comment|list_comments)\z/) {
                 $env->{"app.needs_auth"} = 0;
                 return 0;
             } else {
