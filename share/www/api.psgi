@@ -18,7 +18,7 @@ my $home = (getpwuid($>))[7];  # $ENV{HOME} is empty if via fcgi
 my $conf = $json->decode(~~read_file("$home/cpanlists-server.conf.json"));
 my $dbh  = DBI->connect($conf->{dbdsn} ? $conf->{dbdsn} :
                             "dbi:Pg:dbname=$conf->{dbname};host=localhost",
-                        $conf->{dbuser}, $conf->{dbpass}, {RaiseError=>1});
+                        $conf->{dbuser}, $conf->{dbpass}, {RaiseError=>0});
 CPANLists::Server::__dbh($dbh);
 CPANLists::Server::__init_db();
 
