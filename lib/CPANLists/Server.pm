@@ -27,10 +27,6 @@ my $spec = {
             id SERIAL PRIMARY KEY,
             -- roles TEXT[],
 
-            orig_username VARCHAR(64) NOT NULL, --username at origin site
-            origin VARCHAR(64), -- e.g. 'bitcard' (and later 'twitter', etc)
-            UNIQUE(origin, orig_username),
-
             username VARCHAR(64) NOT NULL, UNIQUE(username), -- username at our site, XXX citext
             first_name VARCHAR(128),
             last_name VARCHAR(128),
@@ -42,6 +38,13 @@ my $spec = {
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             note TEXT
+        )],
+
+        q[CREATE TABLE session (
+            id VARCHAR(36) PRIMARY KEY,
+            userid INT REFERENCES "user"(id),
+            username VARCHAR(64) NOT NULL REFERENCES "user"(username) ON DELETE CASCADE, -- cache, to avoid extra lookup
+            expiry_time TIMESTAMP NOT NULL
         )],
 
         q[CREATE TABLE list (
@@ -316,6 +319,10 @@ _
     args => {
         map {$_=>{}} @bc_params,
     },
+    result => {
+        summary => 'Session key',
+        schema => 'hash*',
+    },
 };
 sub verify_bitcard_signin {
     require Authen::Bitcard;
@@ -331,15 +338,91 @@ sub verify_bitcard_signin {
     my $email = lc($vres->{email});
     my $res = get_user(email => $email);
     if ($res->[0] == 200) {
-        # user already exist, skip creating
-        return [200, "OK", "session_key"];
+        # user already exists
+        my $u = $res->[2]{username};
+        $res = create_or_get_session(username => $u);
+        return err($res, 500, "Can't create/get session") unless $res->[0] == 200;
+        return [200, "OK", {session_id => $res->[2]{id}}];
     } elsif ($res->[0] == 404) {
         # user does not exist, create
-        # XXX
-        return [200, "OK"];
+
+        # pick an available username
+        my @u = ($vres->{username}, $vres->{id});
+        my $u;
+        for (@u) {
+            $res = get_user(username => $_);
+            do { $u = $_; last } if $res->[0] == 404;
+        }
+        return err(500, "Can't pick an available username for $email") if !$u;
+
+        # use the first word as first name, the rest as last name
+        my ($fn, $ln);
+        if (defined $args{bc_name}) {
+            if ($args{bc_name} =~ /(.+?)\s+(.+)/) {
+                $fn = $1; $ln = $2;
+            } else {
+                $fn = $args{bc_name};
+            }
+        }
+        $res = create_user(
+            email => $email, username=>$u, password=>__gen_random_pass,
+            first_name => $fn, last_name => $ln,
+            note => "via bitcard, id=$vres->{id}");
+        return err($res, 500, "Can't create user") unless $res->[0] == 200;
+        $res = create_or_get_session(username => $u);
+        return err($res, 500, "Can't create/get session") unless $res->[0] == 200;
+        return [200, "OK", {session_id => $res->[2]{id}}];
     } else {
         return err($res, 500, "Can't get user");
     }
+}
+
+$SPEC{create_or_get_session} = {
+    v => 1.1,
+    args => {
+        username => {schema=>['str*'], req=>1, pos=>0},
+    },
+};
+sub create_or_get_session {
+    require UUID::Random;
+
+    my %args = @_;
+
+    my $id;
+    my $u;
+    my $row = __dbh->selectrow_hashref("SELECT id FROM session WHERE username=? AND expiry_time >= NOW()", {}, $args{username});
+
+    if ($row) {
+        $id = $row->{id};
+    } else {
+        $id = UUID::Random::generate();
+        __dbh->do("INSERT INTO session (id,username,expiry_time) VALUES (?,?,NOW() + INTERVAL '6 month')", {}, $id, $args{username})
+            or return [500, "Can't create session: " . __dbh->errstr];
+
+        # delete expired sessions
+        __dbh->do("DELETE FROM session WHERE expiry_time < NOW()");
+    }
+
+    [200, "OK", {id=>$id}];
+}
+
+$SPEC{check_session} = {
+    v => 1.1,
+    summary => 'Check if session with certain ID exists and not expired',
+    result => {
+        summary => 'Session information',
+    },
+    args => {
+        id => { schema => ['str*'], req => 1, pos => 0 },
+    },
+};
+sub check_session {
+    my %args = @_;
+    my $row = __dbh->selectrow_hashref("SELECT id, username, userid, expiry_time, expiry_time < NOW() AS is_expired FROM session WHERE id=?", {}, $args{id});
+    return [404, "No such session"] unless $row;
+    return [412, "Session expired, please signin again to get a new session"]
+        if $row->{is_expired};
+    [200, "Session OK", $row];
 }
 
 $SPEC{get_user} = {

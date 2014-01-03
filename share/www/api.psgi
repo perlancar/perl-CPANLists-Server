@@ -69,11 +69,13 @@ my $app = builder {
             my ($user, $pass, $env) = @_;
 
             #my $role;
-            my $res = CPANLists::Server::auth_user(
-                username => $user, password=>$pass);
+            #my $res = CPANLists::Server::auth_user(
+            #    username => $user, password=>$pass);
+            my $res = CPANLists::Server::check_session(
+                username => $user, id => $pass);
             if ($res->[0] == 200) {
                 $env->{"REMOTE_USER"} = $user; # isn't this already done by webserver?
-                $env->{"app.user_id"} = $res->[2]{id};
+                $env->{"app.user_id"} = $res->[2]{userid};
                 return 1;
             }
             return 0;
