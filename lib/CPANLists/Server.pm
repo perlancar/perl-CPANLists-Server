@@ -61,6 +61,9 @@ my $spec = {
         q[CREATE TABLE author (
             id VARCHAR(64) PRIMARY KEY, -- cpan ID
             name VARCHAR(255) NOT NULL,
+            email VARCHAR(255),
+            website VARCHAR(255),
+            gravatar_url VARCHAR(255),
             note TEXT,            -- our internal note, if any
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -78,20 +81,22 @@ my $spec = {
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
 
+        # keep name|comment|rating the same among TYPE_list_item for convenience
         q[CREATE TABLE author_list_item (
             creator INT REFERENCES "user"(id),
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
-            author_id VARCHAR(64) NOT NULL REFERENCES author(id), UNIQUE(list_id, author_id),
+            name VARCHAR(64) NOT NULL REFERENCES author(id), UNIQUE(list_id, name),
             rating INT CHECK (rating BETWEEN 1 AND 5),
             comment TEXT,
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
 
+        # keep name|comment|rating the same among TYPE_list_item for convenience
         q[CREATE TABLE module_list_item (
             creator INT REFERENCES "user"(id),
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
-            module_name VARCHAR(255) NOT NULL REFERENCES module(name), UNIQUE(list_id, module_name),
+            name VARCHAR(255) NOT NULL REFERENCES module(name), UNIQUE(list_id, name),
             rating INT CHECK (rating BETWEEN 1 AND 5),
             comment TEXT,
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -128,16 +133,20 @@ my $spec = {
     ],
 };
 
-my $sch_items = ['array*' => of =>
-                     ['hash*' => {
-                         keys => {
-                             name => ['str*'],
-                             comment => ['str*'],
-                         },
-                         # req_keys => [qw/name/],
-                     },
-                  ],
-             ];
+my $sch_list_type = ['str*', in=>['m','a']];
+my $sch_rating = ['int', between=>[1,5]];
+my $sch_items = [
+    'array*' => of =>
+        ['hash*' => {
+            keys => {
+                name => ['str*'],
+                comment => ['str*'],
+                rating => $sch_rating,
+            },
+            req_keys => [qw/name/],
+        },
+     ],
+];
 
 my $sch_tag = ['str*']; # XXX match => qr/\A[A-Za-z0-9_-]+(::[A-Za-z0-9_-]+)*\z/
 my $sch_tags = ['array*' => of => $sch_tag];
@@ -279,10 +288,13 @@ login is correct, you will get return URL like, which you need to follow:
 
 Either follow this URL, or pass the parameters to the `verify_bitcard_signin`
 function yourself. If signin is verified, a success status (200) will be
-returned along with session key to use. Session key can be used in API calls
-e.g.:
+returned along with session ID to use. Session ID can be used as password in
+HTTP authenticaion e.g.:
 
-    http://cpanlists.org/api/SOME_FUNC?-riap-sesskey=...&PARAM1=...&...
+    curl -u USERNAME:SESSION_ID https://cpanlists.org/api/SOME_FUNC?PARAM1=...
+
+By default session ID can be used for 6 (six) months. If session is expired, you
+can signin again.
 
 _
     args => {
@@ -320,7 +332,7 @@ _
         map {$_=>{}} @bc_params,
     },
     result => {
-        summary => 'Session key',
+        summary => 'Session ID',
         schema => 'hash*',
     },
 };
@@ -513,7 +525,7 @@ $SPEC{list_lists} = {
             tags => [qw/filter/],
         },
         type => {
-            schema => ['str*', in=>['m','a']],
+            schema => $sch_list_type,
             summary => 'Filter only certain type of lists ("a" means '.
                 'lists of authors only, "m" means lists of modules only)',
             tags => [qw/filter/],
@@ -532,10 +544,19 @@ $SPEC{list_lists} = {
             schema => $sch_tags,
             tags => [qw/filter/],
         },
+
+        result_limit => {
+            summary => "Limit number of results",
+            schema => ['int*', default=>5000, min=>1, max=>5000],
+            tags => [qw/paging/],
+        },
     },
 };
 sub list_lists {
     my %args = @_;
+
+    # XXX schema
+    my $limit = $args{result_limit} // 5000;
 
     my $sql = q[SELECT
                   l.id AS id,
@@ -563,7 +584,7 @@ sub list_lists {
         push @wheres, "l.type='m'" if $args{type} eq 'm';
     }
     if (defined $args{creator}) {
-        push @wheres, "l.creator=".__dbh->quote($args{creator});
+        push @wheres, q[l.creator=(SELECT id FROM "user" WHERE username=].__dbh->quote($args{creator}).q[)];
     }
     if (defined $args{id}) {
         push @wheres, "l.id=".__dbh->quote($args{id});
@@ -580,6 +601,7 @@ sub list_lists {
     }
     $sql .= " WHERE ".join(" AND ", map {"($_)"} @wheres) if @wheres;
     $sql .= " ORDER BY num_likes DESC, ctime DESC";
+    $sql .= " LIMIT $limit";
     $log->tracef("sql=%s", $sql);
 
     my $sth = __dbh->prepare($sql);
@@ -591,10 +613,37 @@ sub list_lists {
      {result_format_options=>{table_column_orders=>[ [qw/id name creator description/] ]}}];
 }
 
-sub __get_item {
+sub __get_author {
+    my $cpanid = shift;
+
+    my $row = __dbh->selectrow_hashref("SELECT * FROM author WHERE name=?", {}, $cpanid);
+    return $row if $row;
+
+    # if not already exist, fetch from MetaCPAN
+    $log->debugf("Fetching author '%s' info from MetaCPAN ...", $cpanid);
+    my $mcres;
+    eval {
+        $mcres = $mcpan->author($cpanid);
+    };
+    return undef if $@;
+    $row = {
+        id           => $cpanid,
+        name         => $mcres->{name},
+        email        => $mcres->{email},
+        website      => $mcres->{website} ? $mcres->{website}[0] : undef,
+        gravatar_url => $mcres->{gravatar_url},
+    };
+    $log->debugf("Adding author %s ...", $cpanid);
+    __dbh->do("INSERT INTO author (id, name,email,website,gravatar_url) VALUES (?, ?,?,?,?)", {}, $cpanid,
+              $row->{name}, $row->{email}, $row->{website}, $row->{gravatar_url})
+        or do { $log->errorf("Can't insert author %s: %s", $cpanid, __dbh->errstr); last WORK };
+    return $row;
+}
+
+sub __get_module {
     my $mod = shift;
 
-    my $row = __dbh->selectrow_hashref("SELECT * FROM item WHERE name=?", {}, $mod);
+    my $row = __dbh->selectrow_hashref("SELECT * FROM module WHERE name=?", {}, $mod);
     return $row if $row;
 
     # if not already exist, fetch from MetaCPAN
@@ -613,11 +662,10 @@ sub __get_item {
         version => $mcres->{version_numified},
         reldate => $reldate,
     };
-    $log->debugf("Adding item %s ...", $mod);
-    __dbh->do("INSERT INTO item (name, summary,author,dist,version,reldate) VALUES (?, ?,?,?,?,?)", {}, $mod,
+    $log->debugf("Adding module %s ...", $mod);
+    __dbh->do("INSERT INTO module (name, summary,author,dist,version,reldate) VALUES (?, ?,?,?,?,?)", {}, $mod,
               $row->{summary}, $row->{author}, $row->{dist}, $row->{version}, $row->{reldate})
-        or do { $log->errorf("Can't insert item %s: %s", $mod, __dbh->errstr); last WORK };
-    $row->{id} = __dbh->last_insert_id(undef, undef, "item", undef);
+        or do { $log->errorf("Can't insert module %s: %s", $mod, __dbh->errstr); last WORK };
     return $row;
 }
 
@@ -632,10 +680,16 @@ $SPEC{create_list} = {
             pos => 0,
             description => <<'_',
 
-Examples: "Steven's most favorite modules", "Modules to do blah", "Top ten
-modules you'll want for christmas".
+Examples: "Steven's most favorite modules", "Steven's favorite authors",
+"Modules to do blah", "Top ten modules you'll want for christmas 2014".
 
 _
+        },
+        type => {
+            summary => 'List type, either m (for modules) or a (authors)',
+            schema => $sch_list_type,
+            req => 1,
+            pos => 1,
         },
         description => {
             summary => 'A longer (one to several paragraphs) of description',
@@ -644,18 +698,18 @@ _
 
 Will be interpreted as Markdown.
 
-Module names in the form of `Foo::bar` or `mod://Foo::bar` or `mod://foo` will
-be detected and added as items if indeed are CPAN module names.
+For module lists, module names in the form of `Foo::bar` or `mod://Foo::bar` or
+`mod://foo` will be detected and added as items if indeed are CPAN module names.
 
 _
         },
         scan_modules_from_description => {
             summary => 'Whether to scan module names from description '.
-                'and add them as items',
+                'and add them as items (for module lists only)',
             schema => [bool => default => 0],
         },
         items => {
-            summary => 'Items',
+            summary => 'List items',
             schema => $sch_items,
             description => <<'_',
 
@@ -673,26 +727,29 @@ _
 sub create_list {
     my %args = @_;
     my $desc = $args{description};
+    my $type = $args{type};
+    my $itemterm = $type eq 'm' ? 'module' : 'author';
 
     __dbh->begin_work;
     my $err;
     my @items;
     my $lid;
 
-    push @items, {name=>$_->{name}, comment=>$_->{comment}} for @{ $args{items} // [] };
+    push @items, {name=>$_->{name}, comment=>$_->{comment}, rating=>$_->{rating}}
+        for @{ $args{items} // [] };
 
   WORK:
     {
-        __dbh->do(q[INSERT INTO list (creator, name,description,tags) VALUES (?, ?,?,?)],
+        __dbh->do(q[INSERT INTO list (creator, name,type,description,tags) VALUES (?, ?,?,?,?)],
                   {},
                   (__env() ? __env->{"app.user_id"} : undef),
-                  $args{name}, $desc, $args{tags},
+                  $args{name}, $type, $desc, $args{tags},
               ) or do { $err = [500, "Can't create list: " . __dbh->errstr]; last };
 
         $lid=__dbh->last_insert_id(undef, undef, "list", undef);
 
         # try to detect module names from text, and add them as items
-        if ($args{scan_modules_from_description} && $desc) {
+        if ($type eq 'm' && $args{scan_modules_from_description} && $desc) {
             my @mods;
             while ($desc =~ m!(\w+(?:::\w+)+) | mod://(\w+(?:::\w+)*)!gx) {
                 my $mod = $1 // $2;
@@ -700,29 +757,31 @@ sub create_list {
             }
             $log->debugf("Detected module name(s) %s", \@mods);
             for my $mod (@mods) {
-                my $iteminfo = __get_item($_) for @mods;
+                my $iteminfo = __get_module($_) for @mods;
                 push @items, {name=>$mod, id=>$iteminfo->{id}} unless (grep {$_->{name} eq $mod} @items);
             }
         }
 
         # add the items
+        my $tbl = $type eq 'a' ? 'author_list_item' : 'module_list_item';
         for my $item (@items) {
             my $item_id = $item->{id};
             unless ($item_id) {
-                my $iteminfo = __get_item($item->{name});
+                my $iteminfo = $type eq 'm' ?
+                    __get_module($item->{name}) : __get_author($item->{name});
                 if (!$iteminfo) {
-                    $err = [500, "Can't find module $item->{name}"];
+                    $err = [500, "Can't find $itemterm $item->{name}"];
                     last WORK;
                 }
                 $item_id = $iteminfo->{id};
             }
-            __dbh->do(q[INSERT INTO list_item (list_id,item_id,comment) VALUES (?,?,?)],
+            __dbh->do(qq[INSERT INTO $tbl (list_id,name,comment,rating) VALUES (?,?,?,?)],
                       {},
-                      $lid, $item_id, $item->{comment},
-                  ) or do { $log->errorf("Can't add item %s: %s", $item->{name}, __dbh->errstr); last WORK };
+                      $lid, $item->{name}, $item->{comment}, $item->{rating},
+                  ) or do { $log->errorf("Can't add $itemterm item %s: %s", $item->{name}, __dbh->errstr); last WORK };
         }
     }
-    __activity_log(action => 'create list', note => {name=>$args{name}, description=>$args{description}, items=>\@items}) unless $err;
+    __activity_log(action => 'create list', note => {name=>$args{name}, type=>$type, description=>$desc, items=>\@items}) unless $err;
     if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
 
@@ -814,20 +873,38 @@ $SPEC{list_items} = {
 sub list_items {
     my %args = @_;
 
-    my $sth = __dbh->prepare(
-        "SELECT
-           li.item_id AS id,
-           i.name AS name,
-           i.summary AS abstract,
-           i.author AS author,
-           i.dist AS dist,
-           i.version AS version,
-           i.reldate AS reldate,
-           li.comment AS comment,
-           DATE_PART('epoch', li.ctime)::int AS ctime
-         FROM list_item li
-         LEFT JOIN item i ON li.item_id=i.id
-         WHERE list_id=? ORDER BY li.ctime");
+    my $row = __dbh->selectrow_hashref("SELECT type FROM list WHERE id=?", {}, $args{list_id});
+    return [404, "No such list"] unless $row;
+    my $type = $row->{type};
+
+    my $sth;
+    if ($type eq 'm') {
+        $sth = __dbh->prepare(
+            "SELECT
+               m.name AS name,
+               m.summary AS abstract,
+               m.author AS author,
+               m.dist AS dist,
+               m.version AS version,
+               m.reldate AS reldate,
+               li.comment AS comment,
+               li.rating AS rating,
+               DATE_PART('epoch', li.ctime)::int AS ctime
+             FROM module_list_item li
+             LEFT JOIN module m ON li.name=m.name
+             WHERE list_id=? ORDER BY li.ctime");
+    } else {
+        $sth = __dbh->prepare(
+            "SELECT
+               a.id AS id,
+               a.name AS name,
+               li.comment AS comment,
+               li.rating AS rating,
+               DATE_PART('epoch', li.ctime)::int AS ctime
+             FROM author_list_item li
+             LEFT JOIN author a ON li.name=a.id
+             WHERE list_id=? ORDER BY li.ctime");
+    }
     $sth->execute($args{list_id});
 
     my @items;
@@ -856,12 +933,12 @@ sub get_list {
     my %args = @_;
 
     my $res = list_lists(id => $args{id});
-    return "Can't list items: $res->[0] - $res->[1]" if $res->[0] != 200;
+    return err(500, "Can't get list", $res) if $res->[0] != 200;
     return [404, "No such list"] unless @{$res->[2]};
     my $list = $res->[2][0];
     if ($args{items}) {
         $res = list_items(list_id=>$args{id});
-        return "Can't get items: $res->[0] - $res->[1]" if $res->[0] != 200;
+        return err(500, "Can't get items", $res) if $res->[0] != 200;
         $list->{items} = $res->[2];
     }
     [200, "OK", $list];
@@ -936,6 +1013,12 @@ sub update_list {
     __dbh->begin_work;
     my $err;
 
+    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=?", {}, $args{id});
+    return [404, "No such list"] unless $row;
+    my $type = $row->{type};
+    my $itemterm = $type eq 'm' ? 'module' : 'author';
+    my $tbl = $type eq 'm' ? 'module_list_item' : 'author_list_item';
+
   WORK:
     {
         my $sql = "UPDATE list SET";
@@ -960,23 +1043,24 @@ sub update_list {
         $n+0 or do { $err = [404, "No such list"]; last };
 
         if ($args{new_items}) {
-            __dbh->do("DELETE FROM list_item WHERE list_id=?", {}, $args{id})
+            __dbh->do("DELETE FROM $tbl WHERE list_id=?", {}, $args{id})
                 or do { $err = [500, "Can't delete old items: " . __dbh->errstr]; last WORK };
 
             for my $item (@{ $args{new_items} }) {
                 my $item_id = $item->{id};
                 unless ($item_id) {
-                    my $iteminfo = __get_item($item->{name});
+                    my $iteminfo = $type eq 'm' ? __get_module($item->{name}) :
+                        __get_author($item->{name});
                     if (!$iteminfo) {
-                        $err = [500, "Can't find module $item->{name}"];
+                        $err = [500, "Can't find $itemterm $item->{name}"];
                         last WORK;
                     }
                     $item_id = $iteminfo->{id};
                 }
-                __dbh->do(q[INSERT INTO list_item (list_id,item_id,comment) VALUES (?,?,?)],
+                __dbh->do(qq[INSERT INTO $tbl (list_id, name,comment,rating) VALUES (?, ?,?,?)],
                           {},
-                          $args{id}, $item_id, $item->{comment},
-                      ) or do { $log->errorf("Can't add item %s: %s", $item->{name}, __dbh->errstr); last WORK };
+                          $args{id}, $item->{name}, $item->{comment}, $item->{rating},
+                      ) or do { $log->errorf("Can't add $itemterm item %s: %s", $item->{name}, __dbh->errstr); last WORK };
             }
         }
     }
@@ -996,7 +1080,7 @@ $SPEC{add_item} = {
             pos => 0,
         },
         name => {
-            summary => "Item's name (i.e. module name)",
+            summary => "Item's name (i.e. module name/CPAN ID)",
             schema => ['str*'],
             req => 1,
             pos => 1,
@@ -1007,6 +1091,11 @@ $SPEC{add_item} = {
             pos => 2,
             description => 'Will be interpreted as Markdown',
         },
+        rating => {
+            summary => "Rating",
+            schema => $sch_rating,
+            pos => 3,
+        },
     },
 };
 sub add_item {
@@ -1014,19 +1103,27 @@ sub add_item {
 
     __dbh->begin_work;
     my $err;
+
+    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=?", {}, $args{list_id});
+    return [404, "No such list"] unless $row;
+    my $type = $row->{type};
+    my $itemterm = $type eq 'm' ? 'module' : 'author';
+    my $tbl = $type eq 'm' ? 'module_list_item' : 'author_list_item';
+
   WORK:
     {
-        my $iteminfo = __get_item($args{name});
+        my $iteminfo = $type eq 'm' ? __get_module($args{name}) :
+            __get_author($args{name});
         unless ($iteminfo) {
-            $err = [500, "Can't find module $args{name}"];
+            $err = [500, "Can't find $itemterm $args{name}"];
             last WORK;
         }
-        __dbh->do(q[INSERT INTO list_item (list_id,item_id,comment) VALUES (?,?,?)],
+        __dbh->do(qq[INSERT INTO $tbl (list_id,name,comment,rating) VALUES (?, ?,?,?)],
                   {},
-                  $args{list_id}, $iteminfo->{id}, $args{comment},
-              ) or do { $err = [500, "Can't add item: " . __dbh->errstr]; last };
+                  $args{list_id}, $args{name}, $args{comment}, $args{rating},
+              ) or do { $err = [500, "Can't add $itemterm item: " . __dbh->errstr]; last };
     }
-    __activity_log(action => 'add item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{comment}}) unless $err;
+    __activity_log(action => 'add item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{comment}, rating=>$args{rating}}) unless $err;
     if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
@@ -1042,7 +1139,7 @@ $SPEC{delete_item} = {
             pos => 0,
         },
         name => {
-            summary => "Item's name",
+            summary => "Item's name (i.e. module name/CPAN ID)",
             schema => ['str*'],
             req => 1,
             pos => 1,
@@ -1054,8 +1151,15 @@ sub delete_item {
 
     __dbh->begin_work;
     my $err;
+
+    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=?", {}, $args{list_id});
+    return [404, "No such list"] unless $row;
+    my $type = $row->{type};
+    my $itemterm = $type eq 'm' ? 'module' : 'author';
+    my $tbl = $type eq 'm' ? 'module_list_item' : 'author_list_item';
+
     {
-        __dbh->do(q[DELETE FROM list_item WHERE list_id=? AND item_id=(SELECT id FROM item WHERE name=?)],
+        __dbh->do(qq[DELETE FROM $tbl WHERE list_id=? AND name=?],
                   {},
                   $args{list_id}, $args{name},
               ) or do {
@@ -1089,6 +1193,11 @@ $SPEC{update_item} = {
             schema => ['str'],
             description => "If not specified, comment will not be changed",
         },
+        new_rating => {
+            summary => "Item's new rating",
+            schema => ['str'],
+            description => "If not specified, rating will not be changed",
+        },
     },
 };
 sub update_item {
@@ -1096,30 +1205,41 @@ sub update_item {
 
     __dbh->begin_work;
     my $err;
+
+    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=?", {}, $args{list_id});
+    return [404, "No such list"] unless $row;
+    my $type = $row->{type};
+    my $itemterm = $type eq 'm' ? 'module' : 'author';
+    my $tbl = $type eq 'm' ? 'module_list_item' : 'author_list_item';
+
     {
-        my $sql = "UPDATE list_item SET";
+        my $sql = "UPDATE $tbl SET";
         my @params;
         if (exists $args{new_comment}) {
             $sql .= (@params ? ", ":" ") . "comment=?";
             push @params, $args{new_comment};
         }
+        if (exists $args{new_rating}) {
+            $sql .= (@params ? ", ":" ") . "rating=?";
+            push @params, $args{new_rating};
+        }
         if (!@params) { $err = [304, "No changes"]; last }
         $sql .= ",mtime=CURRENT_TIMESTAMP";
-        $sql .= " WHERE list_id=? AND item_id=(SELECT id FROM item WHERE name=?)";
+        $sql .= " WHERE list_id=? AND name=?";
         push @params, $args{list_id}, $args{name};
         my $n = __dbh->do($sql, {}, @params)
             or do { $err = [500, "Can't update item: " . __dbh->errstr]; last };
         $n+0 or do { $err = [404, "No such item"]; last }
     }
-    __activity_log(action => 'update item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{new_comment}}) unless $err;
+    __activity_log(action => 'update item', note => {list_id=>$args{list_id}, name=>$args{name}, comment=>$args{new_comment}, rating=>$args{new_rating}}) unless $err;
     if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
 
-$SPEC{get_comment} = {
+$SPEC{get_list_comment} = {
     v => 1.1,
-    summary => "Get a single comment",
+    summary => "Get a single list comment",
     args => {
         id => {
             schema => ['int*'],
@@ -1128,7 +1248,7 @@ $SPEC{get_comment} = {
         },
     },
 };
-sub get_comment {
+sub get_list_comment {
     my %args = @_;
 
     my $row = __dbh->selectrow_hashref(
@@ -1137,16 +1257,16 @@ sub get_comment {
            c.comment AS comment,
            (SELECT username FROM "user" u WHERE u.id=c.creator) AS creator,
            DATE_PART('epoch', c.ctime)::int AS ctime
-         FROM comment c
+         FROM list_comment c
          WHERE c.id=?], {}, $args{id});
     if ($row) {
         return [200, "OK", $row];
     } else {
-        return [404, "No such comment"];
+        return [404, "No such list comment"];
     }
 }
 
-$SPEC{list_comments} = {
+$SPEC{list_list_comments} = {
     v => 1.1,
     summary => "List comments to a list",
     args => {
@@ -1161,7 +1281,7 @@ $SPEC{list_comments} = {
         },
     },
 };
-sub list_comments {
+sub list_list_comments {
     my %args = @_;
 
     my $sth = __dbh->prepare(
@@ -1170,7 +1290,7 @@ sub list_comments {
            c.comment AS comment,
            (SELECT username FROM "user" u WHERE u.id=c.creator) AS creator,
            DATE_PART('epoch', c.ctime)::int AS ctime
-         FROM comment c
+         FROM list_comment c
          WHERE c.list_id=? ORDER BY c.ctime]);
     $sth->execute($args{list_id});
 
@@ -1181,7 +1301,7 @@ sub list_comments {
     [200, "OK", \@items];
 }
 
-$SPEC{add_comment} = {
+$SPEC{add_list_comment} = {
     v => 1.1,
     summary => "Add a comment to a list",
     args => {
@@ -1199,7 +1319,7 @@ $SPEC{add_comment} = {
         },
     },
 };
-sub add_comment {
+sub add_list_comment {
     my %args = @_;
 
     my $desc = $args{description};
@@ -1208,23 +1328,23 @@ sub add_comment {
     my $err;
 
     {
-        __dbh->do(q[INSERT INTO comment (creator,list_id,comment) VALUES (?,?,?)],
+        __dbh->do(q[INSERT INTO list_comment (creator,list_id,comment) VALUES (?,?,?)],
                   {},
                   (__env() ? __env->{"app.user_id"} : undef),
                   $args{list_id}, $args{comment})
-            or do { $err = [500, "Can't add comment: " . __dbh->errstr]; last };
+            or do { $err = [500, "Can't add list_comment: " . __dbh->errstr]; last };
 
     }
-    __activity_log(action => 'add comment', note => {list_id=>$args{list_id}, comment=>$args{comment}}) unless $err;
+    __activity_log(action => 'add list comment', note => {list_id=>$args{list_id}, comment=>$args{comment}}) unless $err;
     if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
-    my $cid=__dbh->last_insert_id(undef, undef, "comment", undef);
+    my $cid=__dbh->last_insert_id(undef, undef, "list_comment", undef);
     [200, "OK", { id=>$cid }];
 }
 
-$SPEC{update_comment} = {
+$SPEC{update_list_comment} = {
     v => 1.1,
-    summary => "Update a comment",
+    summary => "Update a list comment",
     args => {
         id => {
             schema => ['int*'],
@@ -1244,7 +1364,7 @@ _
         },
     },
 };
-sub update_comment {
+sub update_list_comment {
     my %args = @_;
 
     my $desc = $args{description};
@@ -1254,7 +1374,7 @@ sub update_comment {
 
   WORK:
     {
-        my $sql = "UPDATE comment SET";
+        my $sql = "UPDATE list_comment SET";
         my @params;
         if (exists $args{new_comment}) {
             $sql .= (@params ? ", ":" ") . " comment=?";
@@ -1264,19 +1384,19 @@ sub update_comment {
         $sql .= ",mtime=CURRENT_TIMESTAMP";
         $sql .= " WHERE id=?";
         push @params, $args{id};
-        my $n = __dbh->do($sql, {}, @params) or do { $err = [500, "Can't update ccomment: " . __dbh->errstr]; last };
+        my $n = __dbh->do($sql, {}, @params) or do { $err = [500, "Can't update list comment: " . __dbh->errstr]; last };
         $n+0 or do { $err = [404, "No such list"]; last };
     }
-    __activity_log(action => 'update comment', note => {id=>$args{id}, new_comment=>$args{new_comment}}, new_tags=>$args{new_tags}) unless $err;
+    __activity_log(action => 'update list comment', note => {id=>$args{id}, new_comment=>$args{new_comment}}, new_tags=>$args{new_tags}) unless $err;
     if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];
 }
 
 # XXX instead of delete row, option to replace comment with "(Deleted)"
-$SPEC{delete_comment} = {
+$SPEC{delete_list_comment} = {
     v => 1.1,
-    summary => "Delete a single comment",
+    summary => "Delete a single list comment",
     args => {
         id => {
             schema => ['int*'],
@@ -1289,18 +1409,18 @@ $SPEC{delete_comment} = {
         },
     },
 };
-sub delete_comment {
+sub delete_list_comment {
     my %args = @_;
 
     __dbh->begin_work;
     my $err;
     {
-        __dbh->do(q[DELETE FROM comment WHERE id=?],
+        __dbh->do(q[DELETE FROM list_comment WHERE id=?],
                   {},
                   $args{id},
-              ) or do { $err = [500, "Can't delete comment: " . __dbh->errstr]; last };
+              ) or do { $err = [500, "Can't delete list comment: " . __dbh->errstr]; last };
     }
-    __activity_log(action => 'delete comment', note => {id=>$args{id}, reason=>$args{reason}}) unless $err;
+    __activity_log(action => 'delete list comment', note => {id=>$args{id}, reason=>$args{reason}}) unless $err;
     if ($err) { __dbh->rollback } else { __dbh->commit }
     return $err if $err;
     [200, "OK"];

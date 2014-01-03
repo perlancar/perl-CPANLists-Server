@@ -21,7 +21,7 @@ my $dbh  = DBI->connect($conf->{dbdsn} ? $conf->{dbdsn} :
                         $conf->{dbuser}, $conf->{dbpass}, {RaiseError=>0});
 CPANLists::Server::__dbh($dbh);
 CPANLists::Server::__init_db();
-CPANLists::Server::__conf($conf); # XXX for security, it's better to not let webapp see db credentials
+CPANLists::Server::__conf($conf); # XXX for security, in the future it's better to not let webapp see db credentials
 
 my $fwr = File::Write::Rotate->new(
     dir       => $conf->{riap_access_log_dir},
@@ -56,7 +56,7 @@ my $app = builder {
 
             # public actions that need not authentication
             if ($action =~ /^(meta|info|actions|list|child_metas)$/ ||
-                    $action eq 'call' && $mod eq 'CPANLists/Server' && $func =~ /\A(get_bitcard_signin_url|verify_bitcard_signin|get_list|list_lists|list_items|get_comment|list_comments)\z/) {
+                    $action eq 'call' && $mod eq 'CPANLists/Server' && $func =~ /\A(get_bitcard_signin_url|verify_bitcard_signin|get_list|list_lists|list_items|get_list_comment|list_list_comments)\z/) {
                 $env->{"app.needs_auth"} = 0;
                 return 0;
             } else {
@@ -103,7 +103,7 @@ my $app = builder {
                     #my $role = $env->{"app.user_role"};
 
                     # everybody can create/comment/like/unlike lists
-                    last if $func =~ /^(create_list|add_comment|like_list|unlike_list)$/;
+                    last if $func =~ /^(create_list|add_list_comment|like_list|unlike_list)$/;
 
                     # user can add item/update/delete item of lists he created
                     if ($func =~ /^(delete_list|update_list|add_item|delete_item|update_item)$/) {
@@ -115,12 +115,12 @@ my $app = builder {
                         last;
                     }
 
-                    # user can update/delete his own comments
-                    if ($func =~ /^(delete_comment|update_comment)$/) {
+                    # user can update/delete his own list comments
+                    if ($func =~ /^(delete_list_comment|update_list_comment)$/) {
                         my $cid = $rreq->{args}{id};
-                        my $res = CPANLists::Server::get_comment(id => $cid);
+                        my $res = CPANLists::Server::get_list_comment(id => $cid);
                         return errpage($env, $res) if $res->[0] != 200;
-                        return errpage($env, [403, "Comment is not yours"])
+                        return errpage($env, [403, "List comment is not yours"])
                             unless $res->[2]{creator} eq $user;
                         last;
                     }
@@ -149,9 +149,23 @@ For testing, you can run:
 
 To test the app:
 
+ # first sign in via bitcard
+ % curl http://localhost:5000/api/get_bitcard_signin_url
+ https://www.bitcard.org/...
+
+ # follow the URL in the browser
+ % curl https://www.bitcard.org/...
+
+ # you will be returned to https://cpanlists.org/api/verify_bitcard_signin?...
+ # replace the host with the test host and follow it
+ % curl http://localhost:5000/api/verify_bitcard_signin?...
+
+ # you will retrieve session ID (SESSID) which will be required to perform
+ # functions that need authentication.
+
  % curl http://localhost:5000/api/list_lists
- % curl -u USER:PASS 'http://localhost:5000/api/like_list?id=1'
- % curl -u USER:PASS 'http://localhost:5000/api/unlike_list?id=1'
+ % curl -u USER:SESSID 'http://localhost:5000/api/like_list?id=1'
+ % curl -u USER:SESSID 'http://localhost:5000/api/unlike_list?id=1'
 
 
 =head1 DESCRIPTION
