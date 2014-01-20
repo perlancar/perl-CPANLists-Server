@@ -1,3 +1,4 @@
-Currently File::ShareDir::Install skips installing dotfiles, so I copy .htaccess
-to htaccess too for the time being. Rename it to .htaccess in your docroot when
-deploying.
+By default File::ShareDir::Install skips installing dotfiles, so I copy
+.htaccess to htaccess too for the time being. File::ShareDir::Install can be
+instructed to copy dotfiles via $INCLUDE_DOTFILES configuration, but
+Dist::Zilla::Plugin::MakeMaker has not yet been able to include dotfiles.
