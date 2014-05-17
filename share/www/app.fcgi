@@ -5,7 +5,7 @@ use Mojolicious::Lite;
 use CPANLists::Server;
 use Data::Dump;
 use DBI;
-use File::Slurp;
+use File::Slurp::Tiny qw(read_file);
 use JSON;
 
 my $json = JSON->new->allow_nonref;

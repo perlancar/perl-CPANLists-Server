@@ -5,7 +5,7 @@ use strict;
 use warnings;
 
 use DBI;
-use File::Slurp;
+use File::Slurp::Tiny qw(read_file);
 use File::Write::Rotate;
 use JSON;
 use Perinci::Access::Base::Patch::PeriAHS;
