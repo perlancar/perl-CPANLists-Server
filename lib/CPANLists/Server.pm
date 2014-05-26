@@ -8,7 +8,7 @@ use Log::Any qw($log);
 # VERSION
 
 use JSON;
-use MetaCPAN::API;
+use MetaCPAN::Client;
 use Perinci::Sub::Util qw(err);
 use SHARYANTO::SQL::Schema 0.04;
 
@@ -17,7 +17,7 @@ use SHARYANTO::SQL::Schema 0.04;
 our %SPEC;
 my $json = JSON->new->allow_nonref;
 
-my $mcpan = MetaCPAN::API->new;
+my $mcpan = MetaCPAN::Client->new;
 
 my $spec = {
     latest_v => 1,
@@ -628,10 +628,10 @@ sub __get_author {
     return undef if $@;
     $row = {
         id           => $cpanid,
-        name         => $mcres->{name},
-        email        => $mcres->{email},
-        website      => $mcres->{website} ? $mcres->{website}[0] : undef,
-        gravatar_url => $mcres->{gravatar_url},
+        name         => $mcres->name,
+        email        => $mcres->email,
+        website      => $mcres->website ? $mcres->website[0] : undef,
+        gravatar_url => $mcres->gravatar_url,
     };
     $log->debugf("Adding author %s ...", $cpanid);
     __dbh->do("INSERT INTO author (id, name,email,website,gravatar_url) VALUES (?, ?,?,?,?)", {}, $cpanid,
@@ -653,13 +653,13 @@ sub __get_module {
         $mcres = $mcpan->module($mod);
     };
     return undef if $@;
-    my $reldate = $mcres->{date} =~ /^(\d\d\d\d)-(\d\d)-(\d\d)T/ ? "$1-$2-$3" : undef;
+    my $reldate = $mcres->date =~ /^(\d\d\d\d)-(\d\d)-(\d\d)T/ ? "$1-$2-$3" : undef;
     $row = {
         name    => $mod,
-        summary => $mcres->{abstract},
-        author  => $mcres->{author},
-        dist    => $mcres->{distribution},
-        version => $mcres->{version_numified},
+        summary => $mcres->abstract,
+        author  => $mcres->author,
+        dist    => $mcres->distribution,
+        version => $mcres->version_numified,
         reldate => $reldate,
     };
     $log->debugf("Adding module %s ...", $mod);
