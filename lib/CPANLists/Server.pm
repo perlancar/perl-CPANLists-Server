@@ -150,10 +150,10 @@ our $sqlspec = {
         q[CREATE INDEX activity_log_ctime ON activity_log (ctime)],
     ],
     upgrade_to_v2 => [
-        q[ALTER TABLE "user" ALTER username TYPE citext NOT NULL],
-        q[ALTER TABLE "user" ALTER email TYPE citext NOT NULL],
-        q[ALTER TABLE list ALTER name TYPE citext NOT NULL],
-        q[ALTER TABLE session ALTER username TYPE citext NOT NULL],
+        q[ALTER TABLE "user" ALTER username TYPE citext],
+        q[ALTER TABLE "user" ALTER email TYPE citext],
+        q[ALTER TABLE list ALTER name TYPE citext],
+        q[ALTER TABLE session ALTER username TYPE citext],
 
         q['ALTER TABLE "user" ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
         q['ALTER TABLE "author" ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
