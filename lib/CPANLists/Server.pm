@@ -18,7 +18,7 @@ my $json = JSON->new->allow_nonref;
 my $mcpan = MetaCPAN::Client->new;
 
 our $sqlspec = {
-    latest_v => 1,
+    latest_v => 2,
 
     # note, pgsql server should be 9.1+, citext must be installed to db: "CREATE
     # EXTENSION citext".
