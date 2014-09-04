@@ -12,26 +12,27 @@ use MetaCPAN::Client;
 use Perinci::Sub::Util qw(err);
 use SHARYANTO::SQL::Schema 0.04;
 
-# TODO: use CITEXT columns when migrating to postgres 9.1+
-
 our %SPEC;
 my $json = JSON->new->allow_nonref;
 
 my $mcpan = MetaCPAN::Client->new;
 
-my $spec = {
+our $sqlspec = {
     latest_v => 1,
+
+    # note, pgsql server should be 9.1+, citext must be installed to db: "CREATE
+    # EXTENSION citext".
 
     install => [
         q[CREATE TABLE "user" (
             id SERIAL PRIMARY KEY,
             -- roles TEXT[],
 
-            username VARCHAR(64) NOT NULL, UNIQUE(username), -- username at our site, XXX citext
+            username citext NOT NULL, UNIQUE(username), -- username at our site
             first_name VARCHAR(128),
             last_name VARCHAR(128),
 
-            email CITEXT(128), UNIQUE(email), -- XXX citext
+            email citext, UNIQUE(email),
             password VARCHAR(255) NOT NULL,
             is_suspended BOOL NOT NULL DEFAULT 'f',
             is_deleted BOOL NOT NULL DEFAULT 'f',
@@ -41,12 +42,12 @@ my $spec = {
             note TEXT
         )],
 
-        q['CREATE TABLE user_notification (
+        q[CREATE TABLE user_notification (
             id SERIAL PRIMARY KEY,
             user_id INT NOT NULL REFERENCES "user"(id),
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             message TEXT,
-            rel VARCHAR(32) NOT NULL, -- 'comment' for new comment,
+            rel VARCHAR(32) NOT NULL, -- 'comment' for new comment
             rel_id INT NOT NULL, -- for comment, list id
             is_read BOOL NOT NULL DEFAULT 'f',
             is_emailed BOOL NOT NULL DEFAULT 'f'
@@ -55,14 +56,14 @@ my $spec = {
         q[CREATE TABLE session (
             id VARCHAR(36) PRIMARY KEY,
             userid INT REFERENCES "user"(id),
-            username VARCHAR(64) NOT NULL REFERENCES "user"(username) ON DELETE CASCADE, -- cache, to avoid extra lookup
+            username citext NOT NULL REFERENCES "user"(username) ON DELETE CASCADE, -- cache, to avoid extra lookup
             expiry_time TIMESTAMP NOT NULL
         )],
 
         q[CREATE TABLE list (
             id SERIAL PRIMARY KEY,
             creator INT REFERENCES "user"(id),
-            name VARCHAR(255) NOT NULL, -- XXX citext
+            name citext NOT NULL,
             type CHAR(1) NOT NULL CHECK (type IN ('m','a')), -- list of (m)odules, or (a)uthors
             description TEXT,
             is_deleted BOOL NOT NULL DEFAULT 'f',
@@ -149,10 +150,13 @@ my $spec = {
         q[CREATE INDEX activity_log_ctime ON activity_log (ctime)],
     ],
     upgrade_to_v2 => [
+        q[ALTER TABLE "user" ALTER username TYPE citext NOT NULL],
+        q[ALTER TABLE "user" ALTER email TYPE citext NOT NULL],
+        q[ALTER TABLE list ALTER name TYPE citext NOT NULL],
+        q[ALTER TABLE session ALTER username TYPE citext NOT NULL],
+
         q['ALTER TABLE "user" ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
-
         q['ALTER TABLE "author" ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
-
         q['ALTER TABLE "module" ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
 
         # we now prevent a list to be actually deleted (but just flag it as
@@ -167,7 +171,7 @@ my $spec = {
 
         # mainly for notifying via email about a new comment. for watching lists,
         # authors, modules in general, we'll use RSS.
-        q['CREATE TABLE user_notification (
+        q[CREATE TABLE user_notification (
             id SERIAL PRIMARY KEY,
             user_id INT NOT NULL REFERENCES "user"(id),
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -224,7 +228,7 @@ sub __conf {
 
 sub __init_db {
     my $res = SHARYANTO::SQL::Schema::create_or_update_db_schema(
-        dbh => __dbh, spec => $spec);
+        dbh => __dbh, spec => $sqlspec);
     die "Can't create/update db schema: $res->[1]" unless $res->[0] == 200;
 }
 
@@ -1013,10 +1017,15 @@ sub delete_list {
     __dbh->begin_work;
     my $err;
     {
-        __dbh->do(q[DELETE FROM list WHERE id=?],
-                  {},
-                  $args{id},
-              ) or do { $err = [500, "Can't delete list: " . __dbh->errstr]; last };
+        if (__dbh->selectrow_hashref("SELECT id FROM list_comment WHERE list_id=? LIMIT 1", {}, $args{id})) {
+            __dbh->do(q[UPDATE list SET is_deleted='t' WHERE id=?], {}, $args{id})
+                or do { $err = [500, "Can't delete (set is_deleted) list: " . __dbh->errstr]; last };
+        } else {
+            __dbh->do(q[DELETE FROM list WHERE id=?],
+                      {},
+                      $args{id},
+                  ) or do { $err = [500, "Can't delete list: " . __dbh->errstr]; last };
+        }
     }
     __activity_log(action => 'delete list', note => {list_id=>$args{list_id}, name=>$args{name}, reason=>$args{reason}}) unless $err;
     if ($err) { __dbh->rollback } else { __dbh->commit }
@@ -1061,7 +1070,7 @@ sub update_list {
     __dbh->begin_work;
     my $err;
 
-    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=?", {}, $args{id});
+    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=? AND NOT is_deleted", {}, $args{id});
     return [404, "No such list"] unless $row;
     my $type = $row->{type};
     my $itemterm = $type eq 'm' ? 'module' : 'author';
@@ -1152,7 +1161,7 @@ sub add_item {
     __dbh->begin_work;
     my $err;
 
-    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=?", {}, $args{list_id});
+    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=? AND NOT is_deleted", {}, $args{list_id});
     return [404, "No such list"] unless $row;
     my $type = $row->{type};
     my $itemterm = $type eq 'm' ? 'module' : 'author';
@@ -1200,7 +1209,7 @@ sub delete_item {
     __dbh->begin_work;
     my $err;
 
-    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=?", {}, $args{list_id});
+    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=? AND NOT is_deleted", {}, $args{list_id});
     return [404, "No such list"] unless $row;
     my $type = $row->{type};
     my $itemterm = $type eq 'm' ? 'module' : 'author';
@@ -1254,7 +1263,7 @@ sub update_item {
     __dbh->begin_work;
     my $err;
 
-    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=?", {}, $args{list_id});
+    my $row = __dbh->selectrow_hashref("SELECT * FROM list WHERE id=? AND NOT is_deleted", {}, $args{list_id});
     return [404, "No such list"] unless $row;
     my $type = $row->{type};
     my $itemterm = $type eq 'm' ? 'module' : 'author';
@@ -1306,7 +1315,7 @@ sub get_list_comment {
            (SELECT username FROM "user" u WHERE u.id=c.creator) AS creator,
            DATE_PART('epoch', c.ctime)::int AS ctime
          FROM list_comment c
-         WHERE c.id=?], {}, $args{id});
+         WHERE c.id=? AND NOT c.is_deleted], {}, $args{id});
     if ($row) {
         return [200, "OK", $row];
     } else {
@@ -1339,7 +1348,7 @@ sub list_list_comments {
            (SELECT username FROM "user" u WHERE u.id=c.creator) AS creator,
            DATE_PART('epoch', c.ctime)::int AS ctime
          FROM list_comment c
-         WHERE c.list_id=? ORDER BY c.ctime]);
+         WHERE c.list_id=? AND NOT is_deleted ORDER BY c.ctime]);
     $sth->execute($args{list_id});
 
     my @items;
@@ -1365,6 +1374,10 @@ $SPEC{add_list_comment} = {
             pos => 1,
             description => 'Will be interpreted as Markdown',
         },
+        ref_id => {
+            summary => 'Parent comment ID, if this is a reply to another comment',
+            schema => ['int*'],
+        },
     },
 };
 sub add_list_comment {
@@ -1376,10 +1389,15 @@ sub add_list_comment {
     my $err;
 
     {
-        __dbh->do(q[INSERT INTO list_comment (creator,list_id,comment) VALUES (?,?,?)],
+        if (defined $args{ref_id}) {
+            # check that ref_id is a comment to the same list
+            __dbh->selectrow_hashref("SELECT id FROM list_comment WHERE id=? AND list_id=?", {}, $args{id}, $args{list_id})
+                or do { $err = [500, "Wrong ref_id (doesn't exist or refers to another list)"]; last };
+        }
+        __dbh->do(q[INSERT INTO list_comment (creator,list_id,comment,ref_id) VALUES (?,?,?,?)],
                   {},
                   (__env() ? __env->{"app.user_id"} : undef),
-                  $args{list_id}, $args{comment})
+                  $args{list_id}, $args{comment}, $args{ref_id})
             or do { $err = [500, "Can't add list_comment: " . __dbh->errstr]; last };
 
     }
@@ -1441,7 +1459,6 @@ sub update_list_comment {
     [200, "OK"];
 }
 
-# XXX instead of delete row, option to replace comment with "(Deleted)"
 $SPEC{delete_list_comment} = {
     v => 1.1,
     summary => "Delete a single list comment",
@@ -1459,6 +1476,8 @@ $SPEC{delete_list_comment} = {
 };
 sub delete_list_comment {
     my %args = @_;
+
+    # XXX if comment has child comment, instead of delete, set flag is_deleted
 
     __dbh->begin_work;
     my $err;
