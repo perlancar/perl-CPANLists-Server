@@ -23,6 +23,12 @@ CPANLists::Server::__dbh($dbh);
 CPANLists::Server::__init_db();
 CPANLists::Server::__conf($conf); # XXX for security, in the future it's better to not let webapp see db credentials
 
+# for testing. for safety, you need to set 'disable_auth' to true in config
+# *and* set environment CPANLISTS_DISABLE_AUTH=1
+my $disable_auth = $conf->{disable_auth} && $ENV{CPANLISTS_DISABLE_AUTH};
+warn "Warning: auth is disabled, we had better run in testing only!\n"
+    if $disable_auth;
+
 my $fwr = File::Write::Rotate->new(
     dir       => $conf->{riap_access_log_dir},
     prefix    => $conf->{riap_access_log_prefix},
@@ -55,8 +61,9 @@ my $app = builder {
             $mod //= ""; $func //= "";
 
             # public actions that need not authentication
-            if ($action =~ /^(meta|info|actions|list|child_metas)$/ ||
-                    $action eq 'call' && $mod eq 'CPANLists/Server' && $func =~ /\A(get_bitcard_signin_url|verify_bitcard_signin|get_list|list_lists|list_items|get_list_comment|list_list_comments)\z/) {
+            if ($disable_auth ||
+                    $action =~ /^(meta|info|actions|list|child_metas)$/ ||
+                        $action eq 'call' && $mod eq 'CPANLists/Server' && $func =~ /\A(get_bitcard_signin_url|verify_bitcard_signin|get_list|list_lists|list_items|get_list_comment|list_list_comments)\z/) {
                 $env->{"app.needs_auth"} = 0;
                 return 0;
             } else {
