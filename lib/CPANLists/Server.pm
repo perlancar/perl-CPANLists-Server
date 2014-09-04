@@ -630,7 +630,7 @@ sub __get_author {
         id           => $cpanid,
         name         => $mcres->name,
         email        => $mcres->email,
-        website      => $mcres->website ? $mcres->website[0] : undef,
+        website      => $mcres->website ? $mcres->website->[0] : undef,
         gravatar_url => $mcres->gravatar_url,
     };
     $log->debugf("Adding author %s ...", $cpanid);
