@@ -31,13 +31,25 @@ my $spec = {
             first_name VARCHAR(128),
             last_name VARCHAR(128),
 
-            email VARCHAR(128), UNIQUE(email), -- XXX citext
+            email CITEXT(128), UNIQUE(email), -- XXX citext
             password VARCHAR(255) NOT NULL,
             is_suspended BOOL NOT NULL DEFAULT 'f',
+            is_deleted BOOL NOT NULL DEFAULT 'f',
 
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             note TEXT
+        )],
+
+        q['CREATE TABLE user_notification (
+            id SERIAL PRIMARY KEY,
+            user_id INT NOT NULL REFERENCES "user"(id),
+            ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            message TEXT,
+            rel VARCHAR(32) NOT NULL, -- 'comment' for new comment,
+            rel_id INT NOT NULL, -- for comment, list id
+            is_read BOOL NOT NULL DEFAULT 'f',
+            is_emailed BOOL NOT NULL DEFAULT 'f'
         )],
 
         q[CREATE TABLE session (
@@ -53,6 +65,7 @@ my $spec = {
             name VARCHAR(255) NOT NULL, -- XXX citext
             type CHAR(1) NOT NULL CHECK (type IN ('m','a')), -- list of (m)odules, or (a)uthors
             description TEXT,
+            is_deleted BOOL NOT NULL DEFAULT 'f',
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             tags TEXT[]
@@ -65,6 +78,7 @@ my $spec = {
             website VARCHAR(255),
             gravatar_url VARCHAR(255),
             note TEXT,            -- our internal note, if any
+            is_deleted BOOL NOT NULL DEFAULT 'f',
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
@@ -77,6 +91,7 @@ my $spec = {
             version VARCHAR(64),  -- from cpan, latest version
             reldate DATE,         -- from cpan, latest release date
             note TEXT,            -- our internal note, if any
+            is_deleted BOOL NOT NULL DEFAULT 'f',
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
@@ -106,8 +121,10 @@ my $spec = {
         q[CREATE TABLE list_comment (
             id SERIAL PRIMARY KEY,
             list_id INT NOT NULL REFERENCES list(id) ON DELETE CASCADE,
+            ref_id INT REFERENCES list_comment(id),
             comment TEXT,
             creator INT REFERENCES "user"(id),
+            is_deleted BOOL NOT NULL DEFAULT 'f',
             ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             mtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )],
@@ -130,6 +147,36 @@ my $spec = {
         )],
 
         q[CREATE INDEX activity_log_ctime ON activity_log (ctime)],
+    ],
+    upgrade_to_v2 => [
+        q['ALTER TABLE "user" ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
+
+        q['ALTER TABLE "author" ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
+
+        q['ALTER TABLE "module" ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
+
+        # we now prevent a list to be actually deleted (but just flag it as
+        # such) if it has comment. the comment can now still be displayed.
+        q['ALTER TABLE list ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
+
+        # we now record to provided threaded discussion, and flag if a comment
+        # is deleted (because a comment cannot be actually deleted now if it is
+        # referred by a response). like in imdb.com discussion.
+        q['ALTER TABLE list_comment ADD COLUMN ref_id INT REFERENCES list(id)],
+        q['ALTER TABLE list_comment ADD COLUMN is_deleted BOOL NOT NULL DEFAULT 'f'],
+
+        # mainly for notifying via email about a new comment. for watching lists,
+        # authors, modules in general, we'll use RSS.
+        q['CREATE TABLE user_notification (
+            id SERIAL PRIMARY KEY,
+            user_id INT NOT NULL REFERENCES "user"(id),
+            ctime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            message TEXT,
+            rel VARCHAR(32) NOT NULL, -- 'comment' for new comment,
+            rel_id INT NOT NULL, -- for comment, list id
+            is_read BOOL NOT NULL DEFAULT 'f',
+            is_emailed BOOL NOT NULL DEFAULT 'f'
+        )],
     ],
 };
 
@@ -557,6 +604,7 @@ sub list_lists {
 
     # XXX schema
     my $limit = $args{result_limit} // 5000;
+    $limit = 5000 if $limit > 5000;
 
     my $sql = q[SELECT
                   l.id AS id,
@@ -571,7 +619,7 @@ sub list_lists {
                   (SELECT COUNT(*) FROM list_comment WHERE list_id=l.id) AS num_comments
                 FROM list l
             ];
-    my @wheres;
+    my @wheres = ('NOT l.is_deleted');
 
     my $q = $args{query} // '';
     if (length($q)) {
