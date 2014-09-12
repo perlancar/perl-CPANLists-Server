@@ -1,11 +1,12 @@
 package CPANLists::Server;
 
+# DATE
+# VERSION
+
 use 5.010001;
 use strict;
 use warnings;
 use Log::Any qw($log);
-
-# VERSION
 
 use JSON;
 use MetaCPAN::Client;
@@ -236,6 +237,8 @@ sub __init_db {
 sub __activity_log {
     my %args = @_;
 
+    local __dbh()->{RaiseError} = 0;
+
     if (__dbh()->do(q[INSERT INTO activity_log (ip,action,param,"user_id",note) VALUES (?,?,?,?,?)],
              {},
              (__env() ? __env->{REMOTE_ADDR} : $ENV{REMOTE_ADDR}),
@@ -295,6 +298,8 @@ $SPEC{create_user} = {
 };
 sub create_user {
     require Authen::Passphrase::BlowfishCrypt;
+
+    local __dbh()->{RaiseError} = 0;
 
     my %args = @_;
 
@@ -448,6 +453,8 @@ $SPEC{create_or_get_session} = {
 };
 sub create_or_get_session {
     require UUID::Random;
+
+    local __dbh()->{RaiseError} = 0;
 
     my %args = @_;
 
@@ -668,6 +675,8 @@ sub list_lists {
 sub __get_author {
     my $cpanid = shift;
 
+    local __dbh()->{RaiseError} = 0;
+
     my $row = __dbh->selectrow_hashref("SELECT * FROM author WHERE name=?", {}, $cpanid);
     return $row if $row;
 
@@ -694,6 +703,8 @@ sub __get_author {
 
 sub __get_module {
     my $mod = shift;
+
+    local __dbh()->{RaiseError} = 0;
 
     my $row = __dbh->selectrow_hashref("SELECT * FROM module WHERE name=?", {}, $mod);
     return $row if $row;
@@ -782,6 +793,8 @@ sub create_list {
     my $type = $args{type};
     my $itemterm = $type eq 'm' ? 'module' : 'author';
 
+    local __dbh()->{RaiseError} = 0;
+
     __dbh->begin_work;
     my $err;
     my @items;
@@ -860,6 +873,8 @@ _
 sub like_list {
     my %args = @_;
 
+    local __dbh()->{RaiseError} = 0;
+
     my $err;
     my $lid = $args{id};
     my $uid = __env() ? __env->{"app.user_id"} : undef; return [412, "Please supply app.user_id in PSGI env"] unless $uid;
@@ -897,6 +912,8 @@ _
 sub unlike_list {
     my %args = @_;
 
+    local __dbh()->{RaiseError} = 0;
+
     my $err;
     my $lid = $args{id};
     my $uid = __env() ? __env->{"app.user_id"} : undef; return [412, "Please supply app.user_id in PSGI env"] unless $uid;
@@ -924,6 +941,8 @@ $SPEC{list_items} = {
 };
 sub list_items {
     my %args = @_;
+
+    local __dbh()->{RaiseError} = 0;
 
     my $row = __dbh->selectrow_hashref("SELECT type FROM list WHERE id=?", {}, $args{list_id});
     return [404, "No such list"] unless $row;
@@ -984,6 +1003,8 @@ $SPEC{get_list} = {
 sub get_list {
     my %args = @_;
 
+    local __dbh()->{RaiseError} = 0;
+
     my $res = list_lists(id => $args{id});
     return err(500, "Can't get list", $res) if $res->[0] != 200;
     return [404, "No such list"] unless @{$res->[2]};
@@ -1013,6 +1034,8 @@ $SPEC{delete_list} = {
 };
 sub delete_list {
     my %args = @_;
+
+    local __dbh()->{RaiseError} = 0;
 
     __dbh->begin_work;
     my $err;
@@ -1066,6 +1089,8 @@ $SPEC{update_list} = {
 };
 sub update_list {
     my %args = @_;
+
+    local __dbh()->{RaiseError} = 0;
 
     __dbh->begin_work;
     my $err;
@@ -1158,6 +1183,8 @@ $SPEC{add_item} = {
 sub add_item {
     my %args = @_;
 
+    local __dbh()->{RaiseError} = 0;
+
     __dbh->begin_work;
     my $err;
 
@@ -1205,6 +1232,8 @@ $SPEC{delete_item} = {
 };
 sub delete_item {
     my %args = @_;
+
+    local __dbh()->{RaiseError} = 0;
 
     __dbh->begin_work;
     my $err;
@@ -1259,6 +1288,8 @@ $SPEC{update_item} = {
 };
 sub update_item {
     my %args = @_;
+
+    local __dbh()->{RaiseError} = 0;
 
     __dbh->begin_work;
     my $err;
@@ -1383,6 +1414,8 @@ $SPEC{add_list_comment} = {
 sub add_list_comment {
     my %args = @_;
 
+    local __dbh()->{RaiseError} = 0;
+
     my $desc = $args{description};
 
     __dbh->begin_work;
@@ -1433,6 +1466,8 @@ _
 sub update_list_comment {
     my %args = @_;
 
+    local __dbh()->{RaiseError} = 0;
+
     my $desc = $args{description};
 
     __dbh->begin_work;
@@ -1477,6 +1512,8 @@ $SPEC{delete_list_comment} = {
 sub delete_list_comment {
     my %args = @_;
 
+    local __dbh()->{RaiseError} = 0;
+
     # XXX if comment has child comment, instead of delete, set flag is_deleted
 
     __dbh->begin_work;
@@ -1493,6 +1530,8 @@ sub delete_list_comment {
     [200, "OK"];
 }
 
+# func: delete_user?
+# func: update_user?
 # func: update_comment()?
 
 1;
