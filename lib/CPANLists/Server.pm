@@ -10,7 +10,7 @@ use Log::Any qw($log);
 use JSON;
 use MetaCPAN::Client;
 use Perinci::Sub::Util qw(err);
-use SHARYANTO::SQL::Schema 0.04;
+use SQL::Schema::Versioned;
 
 our %SPEC;
 my $json = JSON->new->allow_nonref;
@@ -227,7 +227,7 @@ sub __conf {
 }
 
 sub __init_db {
-    my $res = SHARYANTO::SQL::Schema::create_or_update_db_schema(
+    my $res = SQL::Schema::Versioned::create_or_update_db_schema(
         dbh => __dbh, spec => $sqlspec);
     die "Can't create/update db schema: $res->[1]" unless $res->[0] == 200;
 }
