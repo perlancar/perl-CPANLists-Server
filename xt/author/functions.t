@@ -11,7 +11,7 @@ use CPANLists::Server;
 use Test::More 0.98;
 use Test::WithDB;
 
-my $twdb = Test::WithDB->new;
+my $twdb = Test::WithDB->new(config_profile=>'cpanlists-server');
 
 my $env = {REMOTE_ADDR=>'127.0.0.1'};
 CPANLists::Server::__env($env);
