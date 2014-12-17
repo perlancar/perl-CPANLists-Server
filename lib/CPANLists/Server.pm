@@ -14,6 +14,12 @@ use Perinci::Sub::Util qw(err);
 use SQL::Schema::Versioned;
 
 our %SPEC;
+
+$SPEC{':package'} = {
+    v => 1.1,
+    summary => 'Application that runs on cpanlists.org',
+};
+
 my $json = JSON->new->allow_nonref;
 
 my $mcpan = MetaCPAN::Client->new;
@@ -1535,7 +1541,7 @@ sub delete_list_comment {
 # func: update_comment()?
 
 1;
-#ABSTRACT: Application that runs on cpanlists.org
+#ABSTRACT:
 
 =head1 SYNOPSIS
 
