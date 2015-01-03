@@ -1572,9 +1572,6 @@ Mainly so that __activity_log() can get REMOTE_ADDR etc from PSGI environment.
 =back
 
 
-=head1 TODO
-
-
 =head1 SEE ALSO
 
 L<App::cpanlists>
