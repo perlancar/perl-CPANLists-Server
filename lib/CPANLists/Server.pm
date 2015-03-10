@@ -675,7 +675,7 @@ sub list_lists {
     while (my $row = $sth->fetchrow_hashref) { push @rows, $row }
 
     [200, "OK", \@rows,
-     {result_format_options=>{table_column_orders=>[ [qw/id name creator description/] ]}}];
+     {format_options=>{any=>{table_column_orders=>[ [qw/id name creator description/] ]}}}];
 }
 
 sub __get_author {
