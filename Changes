@@ -1,10 +1,10 @@
-0.02    2014-05-17 (SHARYANTO)
+0.02    2014-05-17  Released-By: SHARYANTO
 
         - No functional changes.
 
         - Replace File::Slurp with File::Slurp::Tiny.
 
 
-0.01    2014-01-01 (SHARYANTO)
+0.01    2014-01-01  Released-By: SHARYANTO
 
         - First release.
